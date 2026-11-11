@@ -238,10 +238,34 @@ test("Codex --json command shows while running and completes in the same block",
   let b = f.blocks();
   assert.equal(b.length, 1);
   assert.equal((b[0] as any).summary, "npm test");
-  assert.equal((b[0] as any).result, undefined);
+  assert.equal((b[0] as any).running, true);
+  f.push({ s: "out", t: j({ type: "item.updated", item: { id: "i1", type: "command_execution", command: "npm test", aggregated_output: "3 passing", exit_code: null } }) });
+  assert.equal((f.blocks()[0] as any).result, "3 passing");
+  assert.equal((f.blocks()[0] as any).running, true);
   f.push({ s: "out", t: j({ type: "item.completed", item: { id: "i1", type: "command_execution", command: "npm test", aggregated_output: "ok\n", exit_code: 0, status: "completed" } }) });
   b = f.blocks();
   assert.equal(b.length, 1);
   assert.equal((b[0] as any).result, "ok\n");
   assert.equal((b[0] as any).error, false);
+  assert.equal((b[0] as any).running, undefined);
+});
+
+const codexExec = (out: string[]) => ["OpenAI Codex v0.50.0", "--------", "model: m", "--------", "exec", "bash -lc 'cat x.json' in /tmp", " succeeded in 5ms:", ...out].join("\n");
+
+test("JSON and odd words printed by a Codex command stay command output", () => {
+  const out = ['{"type":"result","result":"fixture"}', '{"type":"assistant","message":{"content":{}}}', "constructor", "toString", "end", ""];
+  const blocks = formatLog([{ s: "err", t: codexExec(out) }]);
+  assert.deepEqual(kinds(blocks), ["noise", "tool"]);
+  assert.equal((blocks[1] as any).result, out.join("\n"));
+});
+
+test("malformed structured events never throw; they show as text", () => {
+  const t = j({ type: "assistant", message: { content: {} } }) + j({ type: "user", message: { content: "x" } }) + j({ type: "item.completed", item: null });
+  assert.doesNotThrow(() => formatLog([{ s: "out", t }]));
+});
+
+test("partial Codex command output shows while it streams", () => {
+  const f = new LogFormatter();
+  f.push({ s: "err", t: codexExec(["line 1", "progress 40%"]) });
+  assert.equal((f.blocks().at(-1) as any).result, "line 1\nprogress 40%");
 });

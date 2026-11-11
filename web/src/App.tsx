@@ -15,15 +15,18 @@ export function App() {
   const [live, setLive] = useState(false);
 
   useEffect(() => {
-    api.state().then((s) => {
+    const load = () => api.state().then((s) => {
       setRepo(s.repo); setDemo(s.demo); setConfig(s.config);
       setRuns(Object.fromEntries(s.runs.map((r) => [r.id, r])));
     });
+    load();
+    // After a reconnect, run updates sent meanwhile were missed: load the state again.
+    let opened = false;
     return connectEvents({
       run: (r) => setRuns((m) => ({ ...m, [r.id]: r })),
       removed: (id) => setRuns((m) => { const n = { ...m }; delete n[id]; return n; }),
       config: setConfig,
-      status: setLive,
+      status: (ok) => { setLive(ok); if (ok && opened) load(); if (ok) opened = true; },
     });
   }, []);
 

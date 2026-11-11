@@ -239,13 +239,14 @@ function LogBlocks({ blocks, running }: { blocks: Block[]; running: boolean }) {
           case "message": return <div key={i} className="blk msg"><div className="lbl">Agent</div><Markdown text={b.text} /></div>;
           case "thinking": return b.text.trim() ? <details key={i} className="blk thinking"><summary>Thinking · {b.text.trim().split("\n")[0].replace(/\*/g, "").slice(0, 100)}</summary><Markdown text={b.text} /></details> : null;
           case "tool": {
-            const state = b.error ? "bad" : b.result !== undefined ? "ok" : "";
+            const finished = b.result !== undefined && !b.running;
+            const state = b.error ? "bad" : finished ? "ok" : "";
             return (
               <details key={i} className={`blk tool ${state}`}>
-                <summary><span className="lbl">{b.name}</span><code>{b.summary}</code><span className="state">{b.error ? "✗ failed" : b.result !== undefined ? "✓" : running && i === blocks.length - 1 ? "…" : ""}</span></summary>
+                <summary><span className="lbl">{b.name}</span><code>{b.summary}</code><span className="state">{b.error ? "✗ failed" : finished ? "✓" : b.running || (running && i === blocks.length - 1) ? "…" : ""}</span></summary>
                 <Full label={b.name === "Command" || b.name === "Shell" || b.name === "Bash" ? "Command" : "Input"} text={b.detail} />
                 {b.input && <Full label="All arguments" text={b.input} />}
-                {b.result !== undefined && <Full label="Result" text={b.result || "(empty)"} />}
+                {b.result !== undefined && <Full label={b.running ? "Output so far" : "Result"} text={b.result || "(empty)"} />}
               </details>
             );
           }

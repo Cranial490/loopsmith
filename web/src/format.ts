@@ -8,7 +8,7 @@ export type Chunk = { s: "out" | "err" | "sys"; t: string };
 export type Block =
   | { kind: "message"; text: string }
   | { kind: "thinking"; text: string }
-  | { kind: "tool"; id?: string; name: string; summary: string; detail: string; input?: string; result?: string; error?: boolean }
+  | { kind: "tool"; id?: string; name: string; summary: string; detail: string; input?: string; result?: string; error?: boolean; running?: boolean }
   | { kind: "output"; text: string }
   | { kind: "error"; title: string; detail?: string }
   | { kind: "warn"; text: string }
@@ -17,7 +17,7 @@ export type Block =
   | { kind: "done"; title: string; text?: string };
 
 type Section = null | "header" | "user" | "thinking" | "exec" | "codex" | "tokens";
-const CODEX_HEADERS: Record<string, Section> = { user: "user", thinking: "thinking", exec: "exec", codex: "codex", "tokens used": "tokens" };
+const CODEX_HEADERS = new Map<string, Section>([["user", "user"], ["thinking", "thinking"], ["exec", "exec"], ["codex", "codex"], ["tokens used", "tokens"]]);
 const TS = /^\[\d{4}-\d\d-\d\dT[^\]]*\]\s*/;
 const DEBUG = /^(\S*\d{4}-\d\d-\d\dT\S+\s+(TRACE|DEBUG|INFO)\b|stream error:.*retrying|Reconnecting\.\.\.|\[?(DEBUG|TRACE)\]?\s)/;
 const LEVEL = (up: string, low: string) => new RegExp(`^(?:\\S*\\d{4}-\\d\\d-\\d\\dT\\S+\\s+(?:${up})\\b|(?:${up})\\b|(?:${low})(?:\\[\\w+\\])?:)[:\\s]*`);
@@ -57,6 +57,7 @@ export class LogFormatter {
       if (!p || p.trimStart().startsWith("{")) continue; // a JSON event still arriving
       const last = out.at(-1);
       if ((this.section === "codex" || this.section === "thinking") && (last?.kind === "message" || last?.kind === "thinking")) out[out.length - 1] = { ...last, text: last.text + p };
+      else if (this.section === "exec" && last?.kind === "tool" && last.result !== undefined) out[out.length - 1] = { ...last, result: last.result + p };
       else if (this.section) continue;
       else if (last?.kind === "output") out[out.length - 1] = { kind: "output", text: last.text + p };
       else out.push({ kind: "output", text: p });
@@ -82,13 +83,17 @@ export class LogFormatter {
   }
 
   private line(raw: string) {
-    if (raw.trimStart().startsWith("{")) {
-      let ev: any;
-      try { ev = JSON.parse(raw); } catch {}
-      if (ev && typeof ev.type === "string" && this.event(ev)) { this.section = null; return; }
+    // Structured CLI events only outside Codex text sections: JSON a command prints is just output.
+    if (!this.section && raw.trimStart().startsWith("{")) {
+      let handled = false;
+      try {
+        const ev = JSON.parse(raw);
+        handled = !!ev && typeof ev.type === "string" && this.event(ev);
+      } catch {}
+      if (handled) return;
     }
     const bare = raw.replace(TS, "");
-    const header = CODEX_HEADERS[bare.trim()];
+    const header = CODEX_HEADERS.get(bare.trim());
     if (/^OpenAI Codex v/.test(bare)) { this.codex = true; this.section = "header"; return this.add({ kind: "noise", title: "Codex startup", lines: [raw] }); }
     if (this.section === "header") {
       if (bare.trim() === "--------" && this.last()?.kind === "noise" && (this.last() as any).lines.length > 1) this.section = null;
@@ -179,7 +184,7 @@ export class LogFormatter {
         else this.noise("System events", JSON.stringify(ev));
         return true;
       case "assistant":
-        for (const c of ev.message?.content ?? []) {
+        for (const c of list(ev.message?.content)) {
           if (c.type === "text" && /^API Error/.test(c.text)) this.add({ kind: "error", title: readableError(c.text), detail: c.text });
           else if (c.type === "text") this.add({ kind: "message", text: c.text });
           else if (c.type === "thinking" && c.thinking) this.add({ kind: "thinking", text: c.thinking });
@@ -187,7 +192,7 @@ export class LogFormatter {
         }
         return true;
       case "user":
-        for (const c of ev.message?.content ?? []) {
+        for (const c of list(ev.message?.content)) {
           if (c.type !== "tool_result") continue;
           const tool = this.list.find((b): b is Extract<Block, { kind: "tool" }> => b.kind === "tool" && b.id === c.tool_use_id);
           if (tool) { tool.result = text(c.content); tool.error = !!c.is_error; }
@@ -213,7 +218,7 @@ export class LogFormatter {
       case "turn.failed": this.add({ kind: "error", title: readableError(ev.error?.message ?? "turn failed"), detail: JSON.stringify(ev) }); return true;
       case "error": this.add({ kind: "error", title: readableError(ev.message ?? JSON.stringify(ev)), detail: JSON.stringify(ev) }); return true;
       case "item.started": case "item.updated": case "item.completed": {
-        const it = ev.item ?? {};
+        const it = ev.item && typeof ev.item === "object" ? ev.item : {};
         const b = itemBlock(it, ev.type === "item.completed");
         const old = it.id != null ? this.items.get(it.id) : undefined;
         if (old) { for (const k of Object.keys(old)) delete (old as any)[k]; Object.assign(old, b); }
@@ -230,9 +235,11 @@ function itemBlock(it: any, done: boolean): Block {
   if (it.type === "reasoning") return { kind: "thinking", text: it.text ?? "" };
   if (it.type === "error") return { kind: "error", title: readableError(it.message ?? ""), detail: JSON.stringify(it) };
   if (it.type === "command_execution") {
-    const b: Block = { kind: "tool", name: "Shell", summary: short(unwrapShell(it.command ?? "")), detail: it.command ?? "" };
-    // Still running: keep partial output but no result yet, so the block shows as in progress.
-    if (done || it.exit_code != null) Object.assign(b, { result: it.aggregated_output ?? "", error: it.exit_code != null && it.exit_code !== 0 });
+    const cmd = String(it.command ?? "");
+    const b: Extract<Block, { kind: "tool" }> = { kind: "tool", name: "Shell", summary: short(unwrapShell(cmd)), detail: cmd };
+    b.result = String(it.aggregated_output ?? "");
+    if (done || it.exit_code != null) b.error = it.exit_code != null && it.exit_code !== 0;
+    else b.running = true; // output so far; not finished yet
     return b;
   }
   return { kind: "tool", name: it.type ?? "item", summary: summarize(it), detail: JSON.stringify(it, null, 2) };
@@ -263,6 +270,8 @@ function toolDetail(input: any): { detail: string; input?: string } {
   if (typeof input?.command !== "string") return { detail: all };
   return Object.keys(input).length > 1 ? { detail: input.command, input: all } : { detail: input.command };
 }
+
+const list = (x: unknown): any[] => (Array.isArray(x) ? x.filter((c) => c && typeof c === "object") : []);
 
 function text(c: unknown): string {
   if (typeof c === "string") return c;
