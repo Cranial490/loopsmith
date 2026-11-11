@@ -269,3 +269,32 @@ test("partial Codex command output shows while it streams", () => {
   f.push({ s: "err", t: codexExec(["line 1", "progress 40%"]) });
   assert.equal((f.blocks().at(-1) as any).result, "line 1\nprogress 40%");
 });
+
+test("events with wrongly typed fields show as text and every block renders", () => {
+  const t =
+    j({ type: "assistant", message: { content: [{ type: "text", text: { unexpected: "value" } }] } }) +
+    j({ type: "assistant", message: { content: [{ type: "thinking", thinking: 5 }, { type: "tool_use", id: 1, name: {}, input: "x" }] } }) +
+    j({ type: "result", result: { a: 1 } }) +
+    j({ type: "item.completed", item: { type: "agent_message", text: ["x"] } });
+  const blocks = formatLog([{ s: "out", t }]);
+  for (const b of blocks) {
+    for (const [k, v] of Object.entries(b)) if (v !== undefined && k !== "kind" && k !== "lines" && k !== "error" && k !== "running") assert.equal(typeof v, "string", `${b.kind}.${k}`);
+    const text = "text" in b ? b.text : undefined;
+    if (typeof text === "string") assert.doesNotThrow(() => renderToStaticMarkup(createElement(Markdown, { text })));
+  }
+  assert.ok(blocks.some((b) => b.kind === "output" && /unexpected/.test(b.text)), "invalid event shown as text");
+});
+
+test("a Codex CLI error during a command marks it failed and is shown", () => {
+  const blocks = formatLog([{ s: "err", t: codexExec(["partial output"]).replace(" succeeded in 5ms:\n", "") + "\nERROR: connection lost\n" }]);
+  const tool = blocks.find((b) => b.kind === "tool") as any;
+  assert.equal(tool.error, true);
+  assert.equal(blocks.at(-1)!.kind, "error");
+  assert.equal((blocks.at(-1) as any).title, "connection lost");
+});
+
+test("partial JSON text inside a Codex message stays visible", () => {
+  const f = new LogFormatter();
+  f.push({ s: "err", t: "OpenAI Codex v1\n--------\nmodel: m\n--------\ncodex\n```json\n{\"a\": 1" });
+  assert.match((f.blocks().at(-1) as any).text, /\{"a": 1$/);
+});

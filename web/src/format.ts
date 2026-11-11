@@ -54,10 +54,10 @@ export class LogFormatter {
   blocks(): Block[] {
     const out = [...this.list];
     for (const p of [this.buf.out, this.buf.err]) {
-      if (!p || p.trimStart().startsWith("{")) continue; // a JSON event still arriving
+      if (!p || (!this.section && p.trimStart().startsWith("{"))) continue; // a JSON event still arriving
       const last = out.at(-1);
       if ((this.section === "codex" || this.section === "thinking") && (last?.kind === "message" || last?.kind === "thinking")) out[out.length - 1] = { ...last, text: last.text + p };
-      else if (this.section === "exec" && last?.kind === "tool" && last.result !== undefined) out[out.length - 1] = { ...last, result: last.result + p };
+      else if (this.section === "exec" && last?.kind === "tool" && last.detail) out[out.length - 1] = { ...last, result: (last.result ?? "") + p };
       else if (this.section) continue;
       else if (last?.kind === "output") out[out.length - 1] = { kind: "output", text: last.text + p };
       else out.push({ kind: "output", text: p });
@@ -88,7 +88,7 @@ export class LogFormatter {
       let handled = false;
       try {
         const ev = JSON.parse(raw);
-        handled = !!ev && typeof ev.type === "string" && this.event(ev);
+        handled = !!ev && typeof ev.type === "string" && wellFormed(ev) && this.event(ev);
       } catch {}
       if (handled) return;
     }
@@ -104,23 +104,29 @@ export class LogFormatter {
     if (header && (this.codex || TS.test(raw)) && this.isHeader(header)) {
       const last = this.last();
       this.codexHeader(header);
-      if (header === "exec" && last?.kind === "tool" && last.result !== undefined) this.maybeExec = last;
+      if (header === "exec" && last?.kind === "tool" && !last.running) this.maybeExec = last;
       return;
     }
 
     const sec = this.section;
     if (sec === "exec") {
       const tool = this.last();
+      // Codex reports its own failures as "ERROR: ..."; one during a command means it did not finish well.
+      if (tool?.kind === "tool" && /^ERROR: /.test(bare)) {
+        if (tool.running) { tool.error = true; delete tool.running; }
+        this.section = null;
+        return this.add({ kind: "error", title: readableError(bare), detail: raw });
+      }
       if (tool?.kind === "tool") {
         if (!tool.detail && prev && !/ in \S+$/.test(bare)) {
           // Not a new command after all: "exec" was part of the previous output.
           this.list.pop();
-          prev.result += "exec\n" + raw + "\n";
+          prev.result = (prev.result ?? "") + "exec\n" + raw + "\n";
           return;
         }
         if (!tool.detail) { tool.detail = bare.replace(/ in \S+$/, ""); tool.summary = short(unwrapShell(tool.detail)); return; }
         const status = /^\s*(succeeded|exited (-?\d+)|failed)\b.*:$/.exec(bare);
-        if (status && tool.result === undefined) { tool.error = status[1] !== "succeeded"; tool.result = ""; return; }
+        if (status && tool.running) { tool.error = status[1] !== "succeeded"; tool.result ??= ""; delete tool.running; return; }
         tool.result = (tool.result ?? "") + raw + "\n";
         return;
       }
@@ -159,7 +165,7 @@ export class LogFormatter {
   private isHeader(h: Section): boolean {
     const last = this.last();
     if (h === "user") return last?.kind === "noise" && last.title === "Codex startup";
-    if (this.section === "exec" && last?.kind === "tool" && last.result === undefined) return false;
+    if (this.section === "exec" && last?.kind === "tool" && last.running) return false;
     if ((this.section === "codex" || this.section === "thinking") && (last?.kind === "message" || last?.kind === "thinking")) {
       return (last.text.match(/^\s*(```|~~~)/gm)?.length ?? 0) % 2 === 0; // not inside a code fence
     }
@@ -170,7 +176,7 @@ export class LogFormatter {
     this.section = h;
     if (h === "thinking") this.add({ kind: "thinking", text: "" });
     else if (h === "codex") this.add({ kind: "message", text: "" });
-    else if (h === "exec") this.add({ kind: "tool", name: "Shell", summary: "", detail: "" });
+    else if (h === "exec") this.add({ kind: "tool", name: "Shell", summary: "", detail: "", running: true });
     else if (h === "tokens") this.add({ kind: "done", title: "Finished" });
     else if (h === "user") this.add({ kind: "noise", title: "Prompt", lines: [] });
   }
@@ -269,6 +275,24 @@ function toolDetail(input: any): { detail: string; input?: string } {
   const all = JSON.stringify(input, null, 2) ?? "";
   if (typeof input?.command !== "string") return { detail: all };
   return Object.keys(input).length > 1 ? { detail: input.command, input: all } : { detail: input.command };
+}
+
+const str = (x: unknown) => typeof x === "string";
+const optStr = (x: unknown) => x == null || typeof x === "string";
+
+/** Fields that become display text must be strings; other shapes are shown as plain text instead. */
+function wellFormed(ev: any): boolean {
+  if (ev.type === "result") return optStr(ev.result) && optStr(ev.subtype);
+  if (ev.type === "assistant") {
+    return list(ev.message?.content).every((c) =>
+      c.type === "text" ? str(c.text) : c.type === "thinking" ? optStr(c.thinking) : c.type === "tool_use" ? str(c.name) && optStr(c.id) : true);
+  }
+  if (ev.type?.startsWith?.("item.")) {
+    const it = ev.item ?? {};
+    return typeof it === "object" && optStr(it.text) && optStr(it.command) && optStr(it.message) && optStr(it.type) && optStr(it.id);
+  }
+  if (ev.type === "error" || ev.type === "turn.failed") return optStr(ev.message) && optStr(ev.error?.message);
+  return true;
 }
 
 const list = (x: unknown): any[] => (Array.isArray(x) ? x.filter((c) => c && typeof c === "object") : []);

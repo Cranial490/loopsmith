@@ -15,16 +15,29 @@ export function App() {
   const [live, setLive] = useState(false);
 
   useEffect(() => {
-    const load = () => api.state().then((s) => {
-      setRepo(s.repo); setDemo(s.demo); setConfig(s.config);
-      setRuns(Object.fromEntries(s.runs.map((r) => [r.id, r])));
-    });
+    // Live updates that arrive while a state request runs wait for it, then apply on top.
+    // A run is never replaced by an older copy of itself, and only the newest request counts.
+    let gen = 0;
+    let queue: (() => void)[] | null = null;
+    const newer = (old: Run | undefined, r: Run) => (!old || r.updatedAt >= old.updatedAt ? r : old);
+    const flush = () => { const q = queue ?? []; queue = null; q.forEach((f) => f()); };
+    const live = (f: () => void) => (queue ? queue.push(f) : f());
+    const load = () => {
+      const my = ++gen;
+      queue ??= [];
+      api.state().then((s) => {
+        if (my !== gen) return;
+        setRepo(s.repo); setDemo(s.demo); setConfig(s.config);
+        setRuns((m) => Object.fromEntries(s.runs.map((r) => [r.id, newer(m[r.id], r)])));
+        flush();
+      }, () => { if (my === gen) flush(); });
+    };
     load();
     // After a reconnect, run updates sent meanwhile were missed: load the state again.
     let opened = false;
     return connectEvents({
-      run: (r) => setRuns((m) => ({ ...m, [r.id]: r })),
-      removed: (id) => setRuns((m) => { const n = { ...m }; delete n[id]; return n; }),
+      run: (r) => live(() => setRuns((m) => ({ ...m, [r.id]: newer(m[r.id], r) }))),
+      removed: (id) => live(() => setRuns((m) => { const n = { ...m }; delete n[id]; return n; })),
       config: setConfig,
       status: (ok) => { setLive(ok); if (ok && opened) load(); if (ok) opened = true; },
     });
