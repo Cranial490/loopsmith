@@ -155,7 +155,7 @@ export class LogFormatter {
     const last = this.last();
     if (h === "user") return last?.kind === "noise" && last.title === "Codex startup";
     if (this.section === "exec" && last?.kind === "tool" && last.result === undefined) return false;
-    if ((this.section === "codex" || this.section === "thinking") && last && "text" in last) {
+    if ((this.section === "codex" || this.section === "thinking") && (last?.kind === "message" || last?.kind === "thinking")) {
       return (last.text.match(/^\s*(```|~~~)/gm)?.length ?? 0) % 2 === 0; // not inside a code fence
     }
     return true;
