@@ -1,8 +1,10 @@
-import type { Run } from "../../server/engine";
+import type { Run, Step } from "../../server/engine";
+import type { TokenUsage } from "../../server/streams";
+export { sumUsage } from "../../server/streams";
 import type { Config, Stage, HarnessConfig } from "../../server/config";
 import type { Issue } from "../../server/github";
 import type { Chunk } from "./format";
-export type { Run, Config, Stage, HarnessConfig, Issue };
+export type { Run, Step, Config, Stage, HarnessConfig, Issue, TokenUsage };
 
 async function call<T>(method: string, url: string, body?: unknown): Promise<T> {
   const res = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
@@ -79,3 +81,5 @@ export function waitingFor(run: Run, runs: Run[]): number[] {
 export function totalCost(run: Run): number {
   return run.steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0);
 }
+
+export const tokens = (n?: number) => (n === undefined ? "?" : n < 1000 ? String(n) : n < 1e6 ? `${(n / 1e3).toFixed(n < 1e4 ? 1 : 0)}k` : `${(n / 1e6).toFixed(2)}M`);

@@ -12,8 +12,11 @@ export interface HarnessConfig {
   resumeArgs?: string[];
   /** Regex (first group) that finds the session id in the CLI output. Not needed when args use {{newSessionId}}. */
   sessionIdPattern?: string;
-  /** "claude-stream-json" reads the final result and cost from Claude's JSON event stream. */
-  format?: "text" | "claude-stream-json";
+  /**
+   * "claude-stream-json" reads the final result, cost and token usage from Claude's JSON event stream.
+   * "codex-json" reads token usage from `codex exec --json` events. "text" only finds Codex's `tokens used` total.
+   */
+  format?: "text" | "claude-stream-json" | "codex-json";
   env?: Record<string, string>;
 }
 
@@ -146,7 +149,8 @@ export const NO_QUESTIONS = `---
 No human is available. Do not ask questions. If something is unclear, make the simplest reasonable choice and record it as an assumption.`;
 
 const CLAUDE_FLAGS = ["--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose"];
-const CODEX_FLAGS = ["--dangerously-bypass-approvals-and-sandbox", "--output-last-message", "{{outputFile}}"];
+const CODEX_FLAGS = ["--json", "--dangerously-bypass-approvals-and-sandbox", "--output-last-message", "{{outputFile}}"];
+const OLD_CODEX_FLAGS = CODEX_FLAGS.slice(1); // before --json; old saved configs are upgraded
 
 export function defaultConfig(): Config {
   return {
@@ -178,7 +182,8 @@ export function defaultConfig(): Config {
         args: ["exec", ...CODEX_FLAGS, "{{prompt}}"],
         resumeArgs: ["exec", ...CODEX_FLAGS, "resume", "{{sessionId}}", "{{prompt}}"],
         continueArgs: ["exec", ...CODEX_FLAGS, "resume", "--last", "{{prompt}}"],
-        sessionIdPattern: "session id:\\s*([0-9a-fA-F-]{8,})",
+        sessionIdPattern: '(?:session id:\\s*|"thread_id":\\s*")([0-9a-fA-F-]{8,})',
+        format: "codex-json",
       },
       pi: {
         label: "Pi",
@@ -229,7 +234,12 @@ export function loadConfig(repo: string): Config {
   for (const [id, h] of Object.entries(cfg.harnesses ?? {})) {
     const d = def.harnesses[id];
     if (d && h.command === d.command && !h.resumeArgs && JSON.stringify(h.args) === JSON.stringify(legacyArgs(id))) {
-      Object.assign(h, { args: d.args, resumeArgs: d.resumeArgs, continueArgs: d.continueArgs, sessionIdPattern: d.sessionIdPattern });
+      Object.assign(h, { args: d.args, resumeArgs: d.resumeArgs, continueArgs: d.continueArgs, sessionIdPattern: d.sessionIdPattern, format: d.format });
+    }
+    // The Codex defaults from before --json (token usage needs the JSON events).
+    if (id === "codex" && d && h.command === d.command && (h.format ?? "text") === "text" && JSON.stringify(h.args) === JSON.stringify(["exec", ...OLD_CODEX_FLAGS, "{{prompt}}"])
+      && JSON.stringify(h.resumeArgs) === JSON.stringify(["exec", ...OLD_CODEX_FLAGS, "resume", "{{sessionId}}", "{{prompt}}"])) {
+      Object.assign(h, { args: d.args, resumeArgs: d.resumeArgs, continueArgs: d.continueArgs, sessionIdPattern: d.sessionIdPattern, format: d.format });
     }
   }
   const errors = validateConfig(cfg);
@@ -239,7 +249,7 @@ export function loadConfig(repo: string): Config {
 
 function legacyArgs(id: string): string[] | undefined {
   if (id === "claude") return ["-p", "{{prompt}}", ...CLAUDE_FLAGS];
-  if (id === "codex") return ["exec", ...CODEX_FLAGS, "{{prompt}}"];
+  if (id === "codex") return ["exec", ...OLD_CODEX_FLAGS, "{{prompt}}"];
   if (id === "pi") return ["-p", "{{prompt}}"];
 }
 
