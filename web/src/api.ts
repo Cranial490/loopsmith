@@ -1,6 +1,7 @@
 import type { Run } from "../../server/engine";
 import type { Config, Stage, HarnessConfig } from "../../server/config";
 import type { Issue } from "../../server/github";
+import type { Chunk } from "./format";
 export type { Run, Config, Stage, HarnessConfig, Issue };
 
 async function call<T>(method: string, url: string, body?: unknown): Promise<T> {
@@ -20,12 +21,12 @@ export const api = {
   sendBack: (id: string, notes: string) => call("POST", `/api/runs/${id}/send-back`, { notes }),
   resume: (id: string, resetLimits = false, fromStage?: string) => call("POST", `/api/runs/${id}/resume`, { resetLimits, fromStage }),
   remove: (id: string) => call("DELETE", `/api/runs/${id}`),
-  log: (id: string, index: number) => fetch(`/api/runs/${id}/steps/${index}/log`).then((r) => r.text()),
+  log: (id: string, index: number) => call<Chunk[]>("GET", `/api/runs/${id}/steps/${index}/log`),
   saveConfig: (cfg: Config) => call<Config>("PUT", "/api/config", cfg),
   defaultConfig: () => call<Config>("GET", "/api/config/default"),
 };
 
-type LogEvent = { runId: string; index: number; text: string };
+type LogEvent = Chunk & { runId: string; index: number };
 const logListeners = new Set<(e: LogEvent) => void>();
 export const onLog = (fn: (e: LogEvent) => void) => { logListeners.add(fn); return () => { logListeners.delete(fn); }; };
 

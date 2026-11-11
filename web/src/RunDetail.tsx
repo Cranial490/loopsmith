@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { api, onLog, STATUS_LABEL, duration, totalCost, type Run, type Config } from "./api";
 import { Stepper, ScoreTrail } from "./RunCard";
+import { LogFormatter, type Block, type Chunk } from "./format";
+import { Markdown } from "./Markdown";
 
 export function RunDetail({ run, config, onBack }: { run: Run; config: Config; onBack: () => void }) {
   const [stepIdx, setStepIdx] = useState<number | null>(null);
@@ -114,21 +116,31 @@ export function RunDetail({ run, config, onBack }: { run: Run; config: Config; o
 function StepView({ run, index, harness, follow, setFollow }: { run: Run; index: number; harness: string; follow: boolean; setFollow: (b: boolean) => void }) {
   const step = run.steps[index];
   const [view, setView] = useState<"log" | "prompt" | "output" | "handoff">("log");
-  const [log, setLog] = useState("");
-  const ref = useRef<HTMLPreElement>(null);
+  const [raw, setRaw] = useState(false);
+  const [, setTick] = useState(0);
+  const log = useRef({ chunks: [] as Chunk[], fmt: new LogFormatter() });
+  const ref = useRef<HTMLDivElement>(null);
+  const atBottom = useRef(true);
 
   useEffect(() => {
-    let cancelled = false;
-    setLog("");
-    api.log(run.id, index).then((t) => !cancelled && setLog(t));
-    const off = onLog((e) => { if (e.runId === run.id && e.index === index) setLog((l) => l + e.text); });
+    let cancelled = false, loaded = false;
+    log.current = { chunks: [], fmt: new LogFormatter() };
+    setTick((t) => t + 1);
+    const add = (c: Chunk) => { log.current.chunks.push(c); log.current.fmt.push(c); };
+    api.log(run.id, index).then((cs) => { if (cancelled) return; cs.forEach(add); loaded = true; setTick((t) => t + 1); });
+    // Live chunks that arrive before the saved log loads are already in it.
+    const off = onLog((e) => { if (loaded && e.runId === run.id && e.index === index) { add({ s: e.s, t: e.t }); setTick((t) => t + 1); } });
     return () => { cancelled = true; off(); };
   }, [run.id, index]);
 
+  // Follow the newest output, unless the user scrolled up to read.
   useEffect(() => {
     const el = ref.current;
-    if (el && view === "log" && follow) el.scrollTop = el.scrollHeight;
-  }, [log, view, follow]);
+    if (el && view === "log" && follow && atBottom.current) el.scrollTop = el.scrollHeight;
+  });
+
+  const rawLog = () => log.current.chunks.map((c) => c.t).join("");
+  const text = view === "prompt" ? step.prompt : view === "handoff" ? step.handoff : view === "output" ? step.output : undefined;
 
   return (
     <div className="stepview">
@@ -141,6 +153,10 @@ function StepView({ run, index, harness, follow, setFollow }: { run: Run; index:
           {(["log", "prompt", "output", "handoff"] as const).map((v) => (
             <button key={v} className={view === v ? "on" : ""} disabled={(v === "prompt" && !step.prompt) || (v === "handoff" && !step.handoff)} onClick={() => setView(v)}>{v}</button>
           ))}
+          <span className="sep" />
+          <button className={raw ? "" : "on"} onClick={() => setRaw(false)} title="Readable view">formatted</button>
+          <button className={raw ? "on" : ""} onClick={() => setRaw(true)} title="The original output, unchanged">raw</button>
+          <CopyButton text={() => (view === "log" ? rawLog() : text ?? "")} label="copy raw" />
           <label className="follow"><input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} /> follow</label>
         </div>
       </div>
@@ -153,7 +169,70 @@ function StepView({ run, index, harness, follow, setFollow }: { run: Run; index:
         {step.vars && Object.entries(step.vars).map(([k, v]) => <span key={k}>{k}: <b>{String(v)}</b></span>)}
         {step.command && <code className="cmd" title={step.command}>{step.command}</code>}
       </div>
-      <pre ref={ref} className="log">{view === "log" ? log || "…" : view === "prompt" ? step.prompt : view === "handoff" ? step.handoff : step.output || "(no output yet)"}</pre>
+      <div ref={ref} className="log" onScroll={(e) => { const el = e.currentTarget; atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
+        {view === "log"
+          ? raw
+            ? <pre className="raw">{log.current.chunks.map((c, i) => <span key={i} className={c.s}>{c.t}</span>)}</pre>
+            : <LogBlocks blocks={log.current.fmt.blocks()} running={step.status === "running"} />
+          : !text
+            ? <span className="muted">{view === "output" ? "(no output yet)" : ""}</span>
+            : raw || view === "prompt" ? <pre className="raw">{text}</pre> : <Markdown text={text} />}
+      </div>
     </div>
+  );
+}
+
+function CopyButton({ text, label = "copy" }: { text: () => string; label?: string }) {
+  const [done, setDone] = useState(false);
+  return <button className="copy" onClick={(e) => { e.preventDefault(); navigator.clipboard?.writeText(text()).then(() => { setDone(true); setTimeout(() => setDone(false), 1200); }); }}>{done ? "copied" : label}</button>;
+}
+
+function Full({ label, text }: { label: string; text: string }) {
+  return (
+    <div className="full">
+      <div className="full-head"><span>{label}</span><CopyButton text={() => text} /></div>
+      <pre>{text}</pre>
+    </div>
+  );
+}
+
+function LogBlocks({ blocks, running }: { blocks: Block[]; running: boolean }) {
+  if (!blocks.length) return <span className="muted">…</span>;
+  return (
+    <>
+      {blocks.map((b, i) => {
+        switch (b.kind) {
+          case "message": return <div key={i} className="blk msg"><div className="lbl">Agent</div><Markdown text={b.text} /></div>;
+          case "thinking": return b.text.trim() ? <details key={i} className="blk thinking"><summary>Thinking · {b.text.trim().split("\n")[0].replace(/\*/g, "").slice(0, 100)}</summary><Markdown text={b.text} /></details> : null;
+          case "tool": {
+            const state = b.error ? "bad" : b.result !== undefined ? "ok" : "";
+            return (
+              <details key={i} className={`blk tool ${state}`}>
+                <summary><span className="lbl">{b.name}</span><code>{b.summary}</code><span className="state">{b.error ? "✗ failed" : b.result !== undefined ? "✓" : running && i === blocks.length - 1 ? "…" : ""}</span></summary>
+                <Full label={b.name === "Command" || b.name === "Shell" || b.name === "Bash" ? "Command" : "Input"} text={b.detail} />
+                {b.result !== undefined && <Full label="Result" text={b.result || "(empty)"} />}
+              </details>
+            );
+          }
+          case "output": return <pre key={i} className="blk out">{b.text.replace(/\n+$/, "")}</pre>;
+          case "error": return (
+            <div key={i} className="blk err">
+              <div className="lbl">Error</div>
+              <div className="err-title">{b.title}</div>
+              {b.detail && b.detail !== b.title && <details><summary>Details</summary><Full label="Diagnostics" text={b.detail} /></details>}
+            </div>
+          );
+          case "warn": return <div key={i} className="blk warn"><span className="lbl">Warning</span> {b.text}</div>;
+          case "system": return <div key={i} className="blk sys">{b.text}</div>;
+          case "noise": return b.lines.length ? <details key={i} className="blk noise"><summary>{b.title} · {b.lines.length} line{b.lines.length > 1 ? "s" : ""}</summary><pre>{b.lines.join("\n")}</pre></details> : null;
+          case "done": return (
+            <div key={i} className="blk done">
+              <span className="lbl">Done</span> {b.title}
+              {b.text && <details><summary>Final answer</summary><Markdown text={b.text} /></details>}
+            </div>
+          );
+        }
+      })}
+    </>
   );
 }

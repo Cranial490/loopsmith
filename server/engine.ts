@@ -40,6 +40,8 @@ export interface Step {
   answer?: string;
 }
 
+export interface LogChunk { s: "out" | "err" | "sys"; t: string }
+
 export interface HandoffNote {
   stepIndex: number;
   stageId: string;
@@ -130,16 +132,25 @@ export class Engine extends EventEmitter {
     this.emit("run", run);
   }
 
-  logPath(runId: string, index: number) {
-    return path.join(this.dataDir, "logs", runId, `${index}.log`);
+  /**
+   * A step log: the original stdout ("out"), stderr ("err") and Loopsmith's own lines ("sys"),
+   * one JSON chunk per line. The UI formats it; the raw view shows it unchanged.
+   */
+  readLog(runId: string, index: number): LogChunk[] {
+    const dir = path.join(this.dataDir, "logs", runId);
+    const p = path.join(dir, `${index}.jsonl`);
+    if (fs.existsSync(p)) return fs.readFileSync(p, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    // Logs saved by older versions are plain text.
+    const old = path.join(dir, `${index}.log`);
+    return fs.existsSync(old) ? [{ s: "out", t: fs.readFileSync(old, "utf8") }] : [];
   }
 
-  private log(run: Run, index: number, text: string) {
+  private log(run: Run, index: number, text: string, s: LogChunk["s"] = "sys") {
     if (!text) return;
-    const p = this.logPath(run.id, index);
+    const p = path.join(this.dataDir, "logs", run.id, `${index}.jsonl`);
     fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.appendFileSync(p, text);
-    this.emit("log", { runId: run.id, index, text });
+    fs.appendFileSync(p, JSON.stringify({ s, t: text }) + "\n");
+    this.emit("log", { runId: run.id, index, s, t: text });
   }
 
   // ---------- public actions ----------
@@ -440,7 +451,7 @@ export class Engine extends EventEmitter {
     }
     if (cfg.setupCommand?.trim()) {
       log(`$ ${cfg.setupCommand}\n`);
-      const proc = startProc({ command: "bash", args: ["-lc", cfg.setupCommand], cwd: run.worktree, timeoutMs: 20 * 60_000, onStdout: log, onStderr: log });
+      const proc = startProc({ command: "bash", args: ["-lc", cfg.setupCommand], cwd: run.worktree, timeoutMs: 20 * 60_000, onStdout: (c) => this.log(run, step.index, c, "out"), onStderr: (c) => this.log(run, step.index, c, "err") });
       this.procs.set(run.id, proc);
       const res = await proc.done;
       this.procs.delete(run.id);
@@ -555,13 +566,13 @@ export class Engine extends EventEmitter {
       cwd: run.worktree,
       env: { ...env, LOOPSMITH_RUN: run.id, LOOPSMITH_ISSUE: String(run.issue.number), LOOPSMITH_STAGE: stage.id, ...(handoffFile ? { LOOPSMITH_HANDOFF_FILE: handoffFile } : {}), ...(questionFile ? { LOOPSMITH_QUESTION_FILE: questionFile } : {}) },
       timeoutMs: stage.timeoutMinutes ? stage.timeoutMinutes * 60_000 : undefined,
-      onStdout: (c) => { keep(c); this.log(run, step.index, parser ? parser.push(c) : c); },
-      onStderr: (c) => { keep(c); this.log(run, step.index, c); },
+      onStdout: (c) => { keep(c); parser?.push(c); this.log(run, step.index, c, "out"); },
+      onStderr: (c) => { keep(c); this.log(run, step.index, c, "err"); },
     });
     this.procs.set(run.id, proc);
     const res = await proc.done;
     this.procs.delete(run.id);
-    if (parser) this.log(run, step.index, parser.flush());
+    parser?.flush();
 
     let output = parser?.result ?? res.stdout;
     if (outputFile && fs.existsSync(outputFile)) {

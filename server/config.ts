@@ -12,7 +12,7 @@ export interface HarnessConfig {
   resumeArgs?: string[];
   /** Regex (first group) that finds the session id in the CLI output. Not needed when args use {{newSessionId}}. */
   sessionIdPattern?: string;
-  /** "claude-stream-json" turns Claude's JSON event stream into readable live logs. */
+  /** "claude-stream-json" reads the final result and cost from Claude's JSON event stream. */
   format?: "text" | "claude-stream-json";
   env?: Record<string, string>;
 }

@@ -1,0 +1,165 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { formatLog, type Block } from "../web/src/format.ts";
+import { Markdown } from "../web/src/Markdown.tsx";
+import { ClaudeStreamParser } from "../server/streams.ts";
+import { Engine } from "../server/engine.ts";
+import { DemoHost } from "../server/demo.ts";
+import { defaultConfig } from "../server/config.ts";
+
+const kinds = (b: Block[]) => b.map((x) => x.kind);
+const j = (o: unknown) => JSON.stringify(o) + "\n";
+
+const claudeStream =
+  j({ type: "system", subtype: "init", session_id: "abc-123", model: "claude-opus-5-5" }) +
+  j({ type: "assistant", message: { content: [{ type: "text", text: "I'll **read** the file." }] } }) +
+  j({ type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "npm test -- " + "x".repeat(400) } }] } }) +
+  j({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "12 passing", is_error: false }] } }) +
+  j({ type: "result", subtype: "success", num_turns: 3, total_cost_usd: 0.42, result: "Done. Opened PR #7." });
+
+test("Claude stream-json: messages, tool calls with full input + result, completion", () => {
+  const blocks = formatLog([{ s: "out", t: claudeStream }]);
+  assert.deepEqual(kinds(blocks), ["system", "message", "tool", "done"]);
+  const tool = blocks[2] as Extract<Block, { kind: "tool" }>;
+  assert.equal(tool.name, "Bash");
+  assert.ok(tool.summary.length < 200, "summary is compact");
+  assert.ok(tool.detail.includes("x".repeat(400)), "full command kept");
+  assert.equal(tool.result, "12 passing");
+  assert.equal(tool.error, false);
+  const done = blocks[3] as Extract<Block, { kind: "done" }>;
+  assert.match(done.title, /3 turns.*\$0\.42/);
+  assert.equal(done.text, "Done. Opened PR #7.");
+});
+
+test("chunk boundaries: split JSON events give the same blocks; partial lines show live", () => {
+  const whole = formatLog([{ s: "out", t: claudeStream }]);
+  const chunks = claudeStream.match(/[\s\S]{1,7}/g)!.map((t) => ({ s: "out" as const, t }));
+  assert.deepEqual(formatLog(chunks), whole);
+  // A plain-text partial line is visible before its newline arrives.
+  const partial = formatLog([{ s: "out", t: "building" }]);
+  assert.deepEqual(partial, [{ kind: "output", text: "building" }]);
+});
+
+test("Claude error result: readable message first, raw JSON as detail", () => {
+  const raw = 'API Error: 404 {"type":"error","error":{"type":"not_found_error","message":"model: claude-nope"}}';
+  const blocks = formatLog([{ s: "out", t: j({ type: "result", subtype: "success", is_error: true, result: raw }) }]);
+  assert.equal(blocks[0].kind, "error");
+  const e = blocks[0] as Extract<Block, { kind: "error" }>;
+  assert.equal(e.title, "model: claude-nope");
+  assert.equal(e.detail, raw);
+});
+
+const codexText = [
+  "OpenAI Codex v0.50.0 (research preview)",
+  "--------",
+  "workdir: /tmp/wt",
+  "model: gpt-5-codex",
+  "session id: 0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+  "--------",
+  "user",
+  "Review the PR. A very long prompt follows.",
+  "thinking",
+  "**Inspecting the diff**",
+  "exec",
+  "bash -lc 'git diff main' in /tmp/wt",
+  " succeeded in 31ms:",
+  "diff --git a/x b/x",
+  "codex",
+  "1. MAJOR: missing check.",
+  "",
+  "SCORE: 6/10",
+  "tokens used",
+  "4,210",
+  "",
+].join("\n");
+
+test("Codex text output: header collapsed, prompt hidden, exec as tool, message as markdown", () => {
+  const blocks = formatLog([{ s: "err", t: codexText }]);
+  assert.deepEqual(kinds(blocks), ["noise", "noise", "thinking", "tool", "message", "done"]);
+  const tool = blocks[3] as Extract<Block, { kind: "tool" }>;
+  assert.equal(tool.summary, "git diff main");
+  assert.match(tool.result!, /diff --git/);
+  assert.equal(tool.error, false);
+  assert.match((blocks[4] as any).text, /SCORE: 6\/10/);
+  assert.match((blocks[5] as any).title, /4,210 tokens/);
+});
+
+test("Codex unsupported-model error is prominent; repeated retries are folded", () => {
+  const err = [
+    "stream error: unexpected status 400; retrying 1/5 in 200ms…",
+    "stream error: unexpected status 400; retrying 2/5 in 400ms…",
+    `ERROR: {"detail":"The 'gpt-9' model is not supported when using Codex with a ChatGPT account."}`,
+    "",
+  ].join("\n");
+  const blocks = formatLog([{ s: "err", t: err }]);
+  assert.deepEqual(kinds(blocks), ["noise", "error"]);
+  const e = blocks[1] as Extract<Block, { kind: "error" }>;
+  assert.equal(e.title, "The 'gpt-9' model is not supported when using Codex with a ChatGPT account.");
+  assert.match(e.detail!, /^ERROR: \{"detail"/);
+});
+
+test("Codex --json events are formatted too", () => {
+  const t =
+    j({ type: "thread.started", thread_id: "th-1" }) +
+    j({ type: "item.completed", item: { type: "agent_message", text: "All good." } }) +
+    j({ type: "item.completed", item: { type: "command_execution", command: "bash -lc ls", aggregated_output: "a\n", exit_code: 1 } }) +
+    j({ type: "turn.failed", error: { message: "quota exceeded" } });
+  const blocks = formatLog([{ s: "out", t }]);
+  assert.deepEqual(kinds(blocks), ["system", "message", "tool", "error"]);
+  assert.equal((blocks[2] as any).error, true);
+  assert.equal((blocks[3] as any).title, "quota exceeded");
+});
+
+test("plain text / unknown events / loopsmith lines / old saved logs stay readable", () => {
+  const blocks = formatLog([
+    { s: "sys", t: "$ node fake.mjs <prompt>\n\n" },
+    { s: "out", t: "hello\nworld\n" + j({ type: "mystery", x: 1 }) },
+    { s: "sys", t: "\n[loopsmith] handoff note saved (10 chars)\n" },
+  ]);
+  assert.deepEqual(kinds(blocks), ["tool", "output", "system"]);
+  assert.match((blocks[1] as any).text, /hello\nworld\n\{"type":"mystery"/);
+  // An old plain-text .log file (served as one chunk) still shows its lines.
+  const old = formatLog([{ s: "out", t: "$ claude -p <prompt>\n\n● session x\n→ Bash npm test\n" }]);
+  assert.ok(old.some((b) => b.kind === "output" && /→ Bash npm test/.test((b as any).text)));
+});
+
+test("Markdown renders lists, links, code; never raw HTML or unsafe links", () => {
+  const html = renderToStaticMarkup(createElement(Markdown, {
+    text: "# Title\n\n- one **bold**\n- two `code`\n\n1. first\n\n[site](https://x.dev) [bad](javascript:alert(1))\n\n```ts\nconst a = 1 < 2;\n```\n\n<script>alert(1)</script><img src=x onerror=alert(1)>",
+  }));
+  assert.match(html, /<h1>Title<\/h1>/);
+  assert.match(html, /<ul><li>one <strong>bold<\/strong><\/li><li>two <code>code<\/code><\/li><\/ul>/);
+  assert.match(html, /<ol><li>first<\/li><\/ol>/);
+  assert.match(html, /<a href="https:\/\/x.dev"[^>]*>site<\/a>/);
+  assert.doesNotMatch(html, /href="javascript/);
+  assert.match(html, /<pre><code[^>]*>const a = 1 &lt; 2;<\/code><\/pre>/);
+  assert.doesNotMatch(html, /<script|<img/);
+  assert.match(html, /&lt;script&gt;/);
+});
+
+test("server keeps the Claude result/cost; formatting is not in the pipeline path", () => {
+  const p = new ClaudeStreamParser();
+  for (const c of claudeStream.match(/[\s\S]{1,5}/g)!) p.push(c);
+  p.flush();
+  assert.equal(p.result, "Done. Opened PR #7.");
+  assert.equal(p.costUsd, 0.42);
+});
+
+test("engine saves the original stdout/stderr per stream; old .log files are still served", async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "ls-fmt-"));
+  const cfg = defaultConfig();
+  const engine = new Engine(repo, () => cfg, new DemoHost());
+  const run = { id: "r1" } as any;
+  (engine as any).log(run, 0, '{"type":"x"}\n', "out");
+  (engine as any).log(run, 0, "warn\n", "err");
+  (engine as any).log(run, 0, "[loopsmith] hi\n");
+  assert.deepEqual(engine.readLog("r1", 0), [{ s: "out", t: '{"type":"x"}\n' }, { s: "err", t: "warn\n" }, { s: "sys", t: "[loopsmith] hi\n" }]);
+  fs.mkdirSync(path.join(repo, ".loopsmith/logs/old"), { recursive: true });
+  fs.writeFileSync(path.join(repo, ".loopsmith/logs/old/0.log"), "plain old log\n");
+  assert.deepEqual(engine.readLog("old", 0), [{ s: "out", t: "plain old log\n" }]);
+});
