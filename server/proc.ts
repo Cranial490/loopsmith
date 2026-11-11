@@ -22,7 +22,7 @@ export function startProc(opts: {
 }): RunningProc {
   const child = spawn(opts.command, opts.args, {
     cwd: opts.cwd,
-    env: { ...process.env, ...opts.env },
+    env: { ...inheritedEnv(), ...opts.env },
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -48,6 +48,15 @@ export function startProc(opts: {
     child.on("close", (code: number | null) => { if (timer) clearTimeout(timer); resolve({ code, stdout, killed }); });
   });
   return { done, kill };
+}
+
+/**
+ * The parent's environment without LOOPSMITH_* run context. When Loopsmith runs inside
+ * a Loopsmith agent (self-hosting tests), the outer run's question/handoff paths must not
+ * leak into a stage; each stage sets its own LOOPSMITH_* values via opts.env.
+ */
+function inheritedEnv(): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("LOOPSMITH_")));
 }
 
 /** Run a short command and return stdout. Rejects on non-zero exit. */

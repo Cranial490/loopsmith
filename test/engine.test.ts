@@ -223,3 +223,37 @@ test("an agent can stop to ask a question; the answer continues its session", as
   assert.match(r2.steps[0].prompt!, /Do not ask questions/);
   assert.equal(r2.steps.length, 2);
 });
+
+test("stages do not inherit question/handoff paths from an outer Loopsmith run", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ls-outer-"));
+  const outerQ = path.join(tmp, "outer-q.md"), outerH = path.join(tmp, "outer-h.md");
+  fs.writeFileSync(outerQ, "SENTINEL-Q"); fs.writeFileSync(outerH, "SENTINEL-H");
+  const saved = { q: process.env.LOOPSMITH_QUESTION_FILE, h: process.env.LOOPSMITH_HANDOFF_FILE, o: process.env.LS_ORDINARY };
+  Object.assign(process.env, { LOOPSMITH_QUESTION_FILE: outerQ, LOOPSMITH_HANDOFF_FILE: outerH, LS_ORDINARY: "kept" });
+  try {
+    const { repo, cfg } = makeRepo();
+    // Writes into whatever paths it sees, like a careless nested agent would.
+    const script = 'echo "Q=${LOOPSMITH_QUESTION_FILE-none} H=${LOOPSMITH_HANDOFF_FILE-none} O=$LS_ORDINARY"; [ -z "$LOOPSMITH_QUESTION_FILE" ] || [ "$ASK" != 1 ] || echo "1. leaked?" > "$LOOPSMITH_QUESTION_FILE"; [ -z "$LOOPSMITH_HANDOFF_FILE" ] || echo "note" > "$LOOPSMITH_HANDOFF_FILE"';
+    cfg.harnesses.sh = { command: "bash", args: ["-c", script], env: { ASK: "1" } };
+    cfg.harnesses.sh2 = { command: "bash", args: ["-c", script] };
+    cfg.pipeline = [
+      { id: "off", type: "agent", harness: "sh", prompt: "x", allowQuestions: false, writeHandoff: false },
+      { id: "on", type: "agent", harness: "sh2", prompt: "x" },
+    ];
+    const engine = new Engine(repo, () => cfg, new DemoHost());
+    const [run] = engine.enqueue([{ number: 1, title: "t" }], { autoApprove: false });
+    await waitFor(() => run.status === "done");
+    const [off, on] = run.steps;
+    assert.equal(off.output!.trim(), "Q=none H=none O=kept");
+    assert.equal(off.question, undefined);
+    assert.equal(fs.readFileSync(outerQ, "utf8"), "SENTINEL-Q");
+    assert.equal(fs.readFileSync(outerH, "utf8"), "SENTINEL-H");
+    const dataDir = path.join(repo, ".loopsmith");
+    assert.equal(on.output!.trim(), `Q=${path.join(dataDir, "questions", run.id, "1.md")} H=${path.join(dataDir, "handoff", run.id, "1.md")} O=kept`);
+    assert.equal(on.handoff, "note");
+  } finally {
+    for (const [k, v] of [["LOOPSMITH_QUESTION_FILE", saved.q], ["LOOPSMITH_HANDOFF_FILE", saved.h], ["LS_ORDINARY", saved.o]] as const) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }
+});
