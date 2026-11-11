@@ -298,3 +298,30 @@ test("partial JSON text inside a Codex message stays visible", () => {
   f.push({ s: "err", t: "OpenAI Codex v1\n--------\nmodel: m\n--------\ncodex\n```json\n{\"a\": 1" });
   assert.match((f.blocks().at(-1) as any).text, /\{"a": 1$/);
 });
+
+test("FATAL and timestamped ERROR lines during a command fail it and are shown", () => {
+  for (const line of ["FATAL: connection lost", "2026-01-01T00:00:00Z ERROR codex_core: connection lost"]) {
+    const t = codexExec(["partial output"]).replace(" succeeded in 5ms:\n", "") + "\n" + line + "\n";
+    const blocks = formatLog([{ s: "err", t }]);
+    const tool = blocks.find((b) => b.kind === "tool") as any;
+    assert.equal(tool.error, true, line);
+    assert.equal(tool.running, undefined, line);
+    assert.equal(blocks.at(-1)!.kind, "error", line);
+    assert.match((blocks.at(-1) as any).title, /connection lost/);
+  }
+});
+
+test("Codex --json: a failed status without an exit code is a failure", () => {
+  const blocks = formatLog([{ s: "out", t: j({ type: "item.completed", item: { id: "c", type: "command_execution", command: "x", aggregated_output: "", exit_code: null, status: "failed" } }) }]);
+  assert.equal((blocks[0] as any).error, true);
+});
+
+test("unsupported Claude content and unmatched tool results stay visible", () => {
+  const t =
+    j({ type: "assistant", message: { content: [{ type: "server_tool_use_v9", data: "keep-me-1" }] } }) +
+    j({ type: "assistant", message: { content: "keep-me-2" } }) +
+    j({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "nope", content: "keep-me-3" }] } }) +
+    j({ type: "user", message: { content: ["keep-me-4"] } });
+  const shown = JSON.stringify(formatLog([{ s: "out", t }]));
+  for (const k of ["keep-me-1", "keep-me-2", "keep-me-3", "keep-me-4"]) assert.ok(shown.includes(k), k);
+});

@@ -22,6 +22,7 @@ const TS = /^\[\d{4}-\d\d-\d\dT[^\]]*\]\s*/;
 const DEBUG = /^(\S*\d{4}-\d\d-\d\dT\S+\s+(TRACE|DEBUG|INFO)\b|stream error:.*retrying|Reconnecting\.\.\.|\[?(DEBUG|TRACE)\]?\s)/;
 const LEVEL = (up: string, low: string) => new RegExp(`^(?:\\S*\\d{4}-\\d\\d-\\d\\dT\\S+\\s+(?:${up})\\b|(?:${up})\\b|(?:${low})(?:\\[\\w+\\])?:)[:\\s]*`);
 const ERROR = LEVEL("ERROR|FATAL", "Error|error|fatal");
+const CLI_ERROR = /^(?:\S*\d{4}-\d\d-\d\dT\S+\s+)?(?:ERROR|FATAL)\b/;
 const WARN = LEVEL("WARN|WARNING", "Warning|warning");
 
 export class LogFormatter {
@@ -111,8 +112,9 @@ export class LogFormatter {
     const sec = this.section;
     if (sec === "exec") {
       const tool = this.last();
-      // Codex reports its own failures as "ERROR: ..."; one during a command means it did not finish well.
-      if (tool?.kind === "tool" && /^ERROR: /.test(bare)) {
+      // Codex reports its own failures as ERROR/FATAL lines (maybe timestamped); one during a command means it failed.
+      // Lowercase "Error:" stays command output: programs print those (stack traces).
+      if (tool?.kind === "tool" && CLI_ERROR.test(bare)) {
         if (tool.running) { tool.error = true; delete tool.running; }
         this.section = null;
         return this.add({ kind: "error", title: readableError(bare), detail: raw });
@@ -195,13 +197,15 @@ export class LogFormatter {
           else if (c.type === "text") this.add({ kind: "message", text: c.text });
           else if (c.type === "thinking" && c.thinking) this.add({ kind: "thinking", text: c.thinking });
           else if (c.type === "tool_use") this.add({ kind: "tool", id: c.id, name: c.name, summary: summarize(c.input), ...toolDetail(c.input) });
+          else if (c.type !== "thinking" && c.type !== "redacted_thinking") this.output(JSON.stringify(c)); // unknown content: keep it readable
         }
         return true;
       case "user":
         for (const c of list(ev.message?.content)) {
-          if (c.type !== "tool_result") continue;
+          if (c.type !== "tool_result") { this.output(JSON.stringify(c)); continue; }
           const tool = this.list.find((b): b is Extract<Block, { kind: "tool" }> => b.kind === "tool" && b.id === c.tool_use_id);
           if (tool) { tool.result = text(c.content); tool.error = !!c.is_error; }
+          else this.add({ kind: "tool", name: "Tool result", summary: short(text(c.content)), detail: JSON.stringify(c, null, 2), result: text(c.content), error: !!c.is_error });
         }
         return true;
       case "result": {
@@ -244,7 +248,7 @@ function itemBlock(it: any, done: boolean): Block {
     const cmd = String(it.command ?? "");
     const b: Extract<Block, { kind: "tool" }> = { kind: "tool", name: "Shell", summary: short(unwrapShell(cmd)), detail: cmd };
     b.result = String(it.aggregated_output ?? "");
-    if (done || it.exit_code != null) b.error = it.exit_code != null && it.exit_code !== 0;
+    if (done || it.exit_code != null) b.error = it.status === "failed" || it.status === "declined" || (it.exit_code != null && it.exit_code !== 0);
     else b.running = true; // output so far; not finished yet
     return b;
   }
@@ -283,8 +287,10 @@ const optStr = (x: unknown) => x == null || typeof x === "string";
 /** Fields that become display text must be strings; other shapes are shown as plain text instead. */
 function wellFormed(ev: any): boolean {
   if (ev.type === "result") return optStr(ev.result) && optStr(ev.subtype);
-  if (ev.type === "assistant") {
-    return list(ev.message?.content).every((c) =>
+  if (ev.type === "assistant" || ev.type === "user") {
+    const content = ev.message?.content;
+    if (!Array.isArray(content) || !content.every((c) => c && typeof c === "object")) return false;
+    return content.every((c: any) =>
       c.type === "text" ? str(c.text) : c.type === "thinking" ? optStr(c.thinking) : c.type === "tool_use" ? str(c.name) && optStr(c.id) : true);
   }
   if (ev.type?.startsWith?.("item.")) {
