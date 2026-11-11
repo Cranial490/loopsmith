@@ -8,7 +8,7 @@ export type Chunk = { s: "out" | "err" | "sys"; t: string };
 export type Block =
   | { kind: "message"; text: string }
   | { kind: "thinking"; text: string }
-  | { kind: "tool"; id?: string; name: string; summary: string; detail: string; input?: string; result?: string; error?: boolean; running?: boolean }
+  | { kind: "tool"; id?: string; name: string; summary: string; detail: string; input?: string; result?: string; error?: boolean; running?: boolean; stopped?: boolean }
   | { kind: "output"; text: string }
   | { kind: "error"; title: string; detail?: string }
   | { kind: "warn"; text: string }
@@ -49,6 +49,8 @@ export class LogFormatter {
       this.buf[s] = "";
       if (rest) this.line(rest.replace(/\r$/, ""));
     }
+    // Commands that never reported a status: the step is over, so they stopped. Not a success.
+    for (const b of this.list) if (b.kind === "tool" && b.running) { delete b.running; b.stopped = true; }
   }
 
   /** The blocks so far, plus unfinished lines so live output shows at once. */
@@ -138,11 +140,12 @@ export class LogFormatter {
       if (done?.kind === "done" && bare.trim()) { done.title = `Finished · ${bare.trim()} tokens used`; this.section = null; }
       return;
     }
-    // Codex reports failures as "ERROR: ..." at any point, also right after the prompt.
-    if (sec === "user" && !/^(ERROR|FATAL)\b/.test(bare)) return this.noise("Prompt", raw);
-    if ((sec === "thinking" || sec === "codex") && !/^(ERROR|FATAL)\b/.test(bare)) {
+    // Codex reports failures as ERROR/FATAL lines (maybe timestamped) at any point, also right after
+    // the prompt or while thinking. Inside a code fence of a message they are only example text.
+    if (sec === "user" && !CLI_ERROR.test(bare)) return this.noise("Prompt", raw);
+    if (sec === "thinking" || sec === "codex") {
       const b = this.last();
-      if (b && (b.kind === "thinking" || b.kind === "message")) { b.text += raw + "\n"; return; }
+      if (b && (b.kind === "thinking" || b.kind === "message") && (!CLI_ERROR.test(bare) || inFence(b.text))) { b.text += raw + "\n"; return; }
     }
 
     if (!raw.trim()) {
@@ -169,7 +172,7 @@ export class LogFormatter {
     if (h === "user") return last?.kind === "noise" && last.title === "Codex startup";
     if (this.section === "exec" && last?.kind === "tool" && last.running) return false;
     if ((this.section === "codex" || this.section === "thinking") && (last?.kind === "message" || last?.kind === "thinking")) {
-      return (last.text.match(/^\s*(```|~~~)/gm)?.length ?? 0) % 2 === 0; // not inside a code fence
+      return !inFence(last.text);
     }
     return true;
   }
@@ -280,6 +283,9 @@ function toolDetail(input: any): { detail: string; input?: string } {
   if (typeof input?.command !== "string") return { detail: all };
   return Object.keys(input).length > 1 ? { detail: input.command, input: all } : { detail: input.command };
 }
+
+/** Is the end of this text inside an open ``` / ~~~ code fence? */
+const inFence = (t: string) => (t.match(/^\s*(```|~~~)/gm)?.length ?? 0) % 2 === 1;
 
 const str = (x: unknown) => typeof x === "string";
 const optStr = (x: unknown) => x == null || typeof x === "string";

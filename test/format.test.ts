@@ -325,3 +325,29 @@ test("unsupported Claude content and unmatched tool results stay visible", () =>
   const shown = JSON.stringify(formatLog([{ s: "out", t }]));
   for (const k of ["keep-me-1", "keep-me-2", "keep-me-3", "keep-me-4"]) assert.ok(shown.includes(k), k);
 });
+
+test("timestamped Codex errors after prompt and thinking headers are shown", () => {
+  for (const header of ["user", "thinking"]) {
+    const t = ["OpenAI Codex v1", "--------", "model: m", "--------", ...(header === "thinking" ? ["user", "p"] : []), header, "text", "2026-01-01T00:00:00Z ERROR codex_core: connection lost", ""].join("\n");
+    const blocks = formatLog([{ s: "err", t }]);
+    assert.equal(blocks.at(-1)!.kind, "error", header);
+    assert.match((blocks.at(-1) as any).title, /connection lost/);
+  }
+});
+
+test("an ERROR example inside a fenced Codex message stays part of the message", () => {
+  const t = ["OpenAI Codex v1", "--------", "model: m", "--------", "codex", "Example:", "```", "ERROR: example failure", "```", "", "Next paragraph.", ""].join("\n");
+  const blocks = formatLog([{ s: "err", t }]);
+  assert.deepEqual(kinds(blocks), ["noise", "message"]);
+  assert.match((blocks[1] as any).text, /```\nERROR: example failure\n```\n\nNext paragraph\./);
+});
+
+test("end(): a command without a status is marked stopped, not running or successful", () => {
+  const f = new LogFormatter();
+  f.push({ s: "err", t: codexExec(["partial"]).replace(" succeeded in 5ms:\n", "") + "\n" });
+  f.end();
+  const tool = f.blocks().find((b) => b.kind === "tool") as any;
+  assert.equal(tool.running, undefined);
+  assert.equal(tool.stopped, true);
+  assert.notEqual(tool.error, false);
+});
