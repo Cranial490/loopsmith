@@ -3,8 +3,8 @@
   "version": "0.2.0",
   "description": "Run your issue → implement → review → fix loop across agent CLIs, with a live UI.",
   "scripts": {
-    "start": "tsx server/index.ts",
-    "demo": "tsx server/index.ts --demo",
+    "start": "node bin/loopsmith.js",
+    "demo": "node bin/loopsmith.js --demo",
     "dev": "tsx watch server/index.ts --demo & vite",
     "build": "vite build",
     "typecheck": "tsc -p . && tsc -p web",

@@ -12,7 +12,6 @@ issue ─▶ worktree ─▶ Implement (claude) ─▶ AI review (codex) ──s
 
 ```bash
 npm install
-npm run build          # build the UI once
 
 npm run demo           # try it with fake agents + fake issues (no tokens used)
 # open http://localhost:4317
@@ -23,6 +22,8 @@ npm start -- --repo /path/to/your/repo   # real mode
 Real mode needs `gh` (logged in) and the agent CLIs you use on your `PATH`. On the first start, loopsmith writes `loopsmith.config.json` into your repo. You can edit it in the **Pipeline** tab or by hand.
 
 You can also link it: `npm link`, then run `loopsmith` inside any repo.
+
+`npm start`, `npm run demo`, and the linked `loopsmith` command build the UI before starting the server. A failed build stops startup, so an outdated UI cannot be served with a newer API. After updating Loopsmith, restart it and reload the browser tab. `npm run dev` continues to use Vite's live development server.
 
 ## How it works
 
