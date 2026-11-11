@@ -29,6 +29,10 @@ export class LogFormatter {
   private buf = { out: "", err: "" };
   private section: Section = null;
   private codex = false;
+  /** A finished command whose output may continue: an "exec" line in its output is only a new command if a command line follows. */
+  private maybeExec: Extract<Block, { kind: "tool" }> | undefined;
+  /** Codex --json items by id, so start/update/completion share one block. */
+  private items = new Map<string, Block>();
 
   push(c: Chunk) {
     if (c.s === "sys") return this.sys(c.t);
@@ -90,12 +94,25 @@ export class LogFormatter {
       if (bare.trim() === "--------" && this.last()?.kind === "noise" && (this.last() as any).lines.length > 1) this.section = null;
       return this.noise("Codex startup", raw);
     }
-    if (header && (this.codex || TS.test(raw))) return this.codexHeader(header);
+    const prev = this.maybeExec;
+    this.maybeExec = undefined;
+    if (header && (this.codex || TS.test(raw)) && this.isHeader(header)) {
+      const last = this.last();
+      this.codexHeader(header);
+      if (header === "exec" && last?.kind === "tool" && last.result !== undefined) this.maybeExec = last;
+      return;
+    }
 
     const sec = this.section;
     if (sec === "exec") {
       const tool = this.last();
       if (tool?.kind === "tool") {
+        if (!tool.detail && prev && !/ in \S+$/.test(bare)) {
+          // Not a new command after all: "exec" was part of the previous output.
+          this.list.pop();
+          prev.result += "exec\n" + raw + "\n";
+          return;
+        }
         if (!tool.detail) { tool.detail = bare.replace(/ in \S+$/, ""); tool.summary = short(unwrapShell(tool.detail)); return; }
         const status = /^\s*(succeeded|exited (-?\d+)|failed)\b.*:$/.exec(bare);
         if (status && tool.result === undefined) { tool.error = status[1] !== "succeeded"; tool.result = ""; return; }
@@ -108,7 +125,8 @@ export class LogFormatter {
       if (done?.kind === "done" && bare.trim()) { done.title = `Finished · ${bare.trim()} tokens used`; this.section = null; }
       return;
     }
-    if (sec === "user") return this.noise("Prompt", raw);
+    // Codex reports failures as "ERROR: ..." at any point, also right after the prompt.
+    if (sec === "user" && !/^(ERROR|FATAL)\b/.test(bare)) return this.noise("Prompt", raw);
     if ((sec === "thinking" || sec === "codex") && !/^(ERROR|FATAL)\b/.test(bare)) {
       const b = this.last();
       if (b && (b.kind === "thinking" || b.kind === "message")) { b.text += raw + "\n"; return; }
@@ -130,6 +148,17 @@ export class LogFormatter {
     const l = this.last();
     if (l?.kind === "output") l.text += line + "\n";
     else this.add({ kind: "output", text: line + "\n" });
+  }
+
+  /** Is a Codex section word a real section start here, or just text that looks like one? */
+  private isHeader(h: Section): boolean {
+    const last = this.last();
+    if (h === "user") return last?.kind === "noise" && last.title === "Codex startup";
+    if (this.section === "exec" && last?.kind === "tool" && last.result === undefined) return false;
+    if ((this.section === "codex" || this.section === "thinking") && last && "text" in last) {
+      return (last.text.match(/^\s*(```|~~~)/gm)?.length ?? 0) % 2 === 0; // not inside a code fence
+    }
+    return true;
   }
 
   private codexHeader(h: Section) {
@@ -179,22 +208,34 @@ export class LogFormatter {
         return true;
       // Codex exec --json
       case "thread.started": this.add({ kind: "system", text: `Session ${ev.thread_id}` }); return true;
-      case "turn.started": case "item.started": case "item.updated": return true;
+      case "turn.started": return true;
       case "turn.completed": this.add({ kind: "done", title: `Finished${ev.usage?.output_tokens != null ? ` · ${ev.usage.input_tokens ?? 0} in / ${ev.usage.output_tokens} out tokens` : ""}` }); return true;
       case "turn.failed": this.add({ kind: "error", title: readableError(ev.error?.message ?? "turn failed"), detail: JSON.stringify(ev) }); return true;
       case "error": this.add({ kind: "error", title: readableError(ev.message ?? JSON.stringify(ev)), detail: JSON.stringify(ev) }); return true;
-      case "item.completed": {
+      case "item.started": case "item.updated": case "item.completed": {
         const it = ev.item ?? {};
-        if (it.type === "agent_message") this.add({ kind: "message", text: it.text ?? "" });
-        else if (it.type === "reasoning") this.add({ kind: "thinking", text: it.text ?? "" });
-        else if (it.type === "command_execution") this.add({ kind: "tool", name: "Shell", summary: short(unwrapShell(it.command ?? "")), detail: it.command ?? "", result: it.aggregated_output ?? "", error: it.exit_code != null && it.exit_code !== 0 });
-        else if (it.type === "error") this.add({ kind: "error", title: readableError(it.message ?? ""), detail: JSON.stringify(it) });
-        else this.add({ kind: "tool", name: it.type ?? "item", summary: summarize(it), detail: JSON.stringify(it, null, 2) });
+        const b = itemBlock(it, ev.type === "item.completed");
+        const old = it.id != null ? this.items.get(it.id) : undefined;
+        if (old) { for (const k of Object.keys(old)) delete (old as any)[k]; Object.assign(old, b); }
+        else if (b && (ev.type === "item.completed" || b.kind === "tool")) { this.add(b); if (it.id != null) this.items.set(it.id, b); }
         return true;
       }
     }
     return false;
   }
+}
+
+function itemBlock(it: any, done: boolean): Block {
+  if (it.type === "agent_message") return { kind: "message", text: it.text ?? "" };
+  if (it.type === "reasoning") return { kind: "thinking", text: it.text ?? "" };
+  if (it.type === "error") return { kind: "error", title: readableError(it.message ?? ""), detail: JSON.stringify(it) };
+  if (it.type === "command_execution") {
+    const b: Block = { kind: "tool", name: "Shell", summary: short(unwrapShell(it.command ?? "")), detail: it.command ?? "" };
+    // Still running: keep partial output but no result yet, so the block shows as in progress.
+    if (done || it.exit_code != null) Object.assign(b, { result: it.aggregated_output ?? "", error: it.exit_code != null && it.exit_code !== 0 });
+    return b;
+  }
+  return { kind: "tool", name: it.type ?? "item", summary: summarize(it), detail: JSON.stringify(it, null, 2) };
 }
 
 export function formatLog(chunks: Chunk[]): Block[] {

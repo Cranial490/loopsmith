@@ -207,3 +207,41 @@ test("live log events carry their chunk position, also after a restart", () => {
   assert.deepEqual(seen, [0, 1, 2]);
   assert.equal(b.readLog("r", 0).length, 3);
 });
+
+test("full Codex transcript: an error after the prompt is shown, not folded", () => {
+  const t = [
+    "OpenAI Codex v0.50.0", "--------", "model: gpt-9", "session id: 0199a1b2-c3d4", "--------",
+    "user", "Review the PR.",
+    `ERROR: {"detail":"The 'gpt-9' model is not supported when using Codex with a ChatGPT account."}`, "",
+  ].join("\n");
+  const blocks = formatLog([{ s: "err", t }]);
+  assert.deepEqual(kinds(blocks), ["noise", "noise", "error"]);
+  assert.match((blocks[2] as any).title, /model is not supported/);
+  assert.deepEqual((blocks[1] as any).lines, ["Review the PR."]);
+});
+
+test("Codex section words inside command output and fenced agent text stay text", () => {
+  const t = [
+    "OpenAI Codex v0.50.0", "--------", "model: m", "--------",
+    "exec", "bash -lc whoami in /tmp", " succeeded in 5ms:", "user", "exec", "done",
+    "codex", "Run this:", "```", "codex", "```", "ok", "",
+  ].join("\n");
+  const blocks = formatLog([{ s: "err", t }]);
+  assert.deepEqual(kinds(blocks), ["noise", "tool", "message"]);
+  assert.equal((blocks[1] as any).result, "user\nexec\ndone\n");
+  assert.match((blocks[2] as any).text, /```\ncodex\n```\nok/);
+});
+
+test("Codex --json command shows while running and completes in the same block", () => {
+  const f = new LogFormatter();
+  f.push({ s: "out", t: j({ type: "item.started", item: { id: "i1", type: "command_execution", command: "npm test", aggregated_output: "", exit_code: null, status: "in_progress" } }) });
+  let b = f.blocks();
+  assert.equal(b.length, 1);
+  assert.equal((b[0] as any).summary, "npm test");
+  assert.equal((b[0] as any).result, undefined);
+  f.push({ s: "out", t: j({ type: "item.completed", item: { id: "i1", type: "command_execution", command: "npm test", aggregated_output: "ok\n", exit_code: 0, status: "completed" } }) });
+  b = f.blocks();
+  assert.equal(b.length, 1);
+  assert.equal((b[0] as any).result, "ok\n");
+  assert.equal((b[0] as any).error, false);
+});
