@@ -9,7 +9,7 @@ import type { GitHost, Issue } from "./github.js";
 import { ensureWorktree, removeWorktree, deleteBranch } from "./git.js";
 import { render, renderShell, evalCondition, extractVars } from "./template.js";
 import { startProc, type RunningProc } from "./proc.js";
-import { ClaudeStreamParser } from "./streams.js";
+import { StreamParser, usageSince, type TokenUsage } from "./streams.js";
 
 export type RunStatus = "queued" | "running" | "waiting_approval" | "waiting_input" | "done" | "failed" | "stopped" | "needs_attention" | "interrupted";
 export type StepStatus = "running" | "done" | "failed" | "waiting" | "asked" | "skipped" | "stopped";
@@ -35,6 +35,10 @@ export interface Step {
   /** The agent CLI session of this step. A later stage can continue exactly this session. */
   sessionId?: string;
   costUsd?: number;
+  /** Tokens this step used (see TokenUsage). Missing = the CLI reported none (or not yet). */
+  usage?: TokenUsage;
+  /** The CLI's running total for its whole session at the end of this step, when it reports one (Codex). */
+  sessionUsage?: TokenUsage;
   /** The agent stopped here to ask you this. */
   question?: string;
   answer?: string;
@@ -562,7 +566,14 @@ export class Engine extends EventEmitter {
     this.log(run, step.index, `$ ${step.command}\n\n`);
     this.save(run);
 
-    const parser = format === "claude-stream-json" ? new ClaudeStreamParser() : undefined;
+    const parser = format === "claude-stream-json" ? new StreamParser() : undefined;
+    // Usage can be on either stream (Codex text prints its footer on stderr).
+    const usageOut = stage.type === "agent" ? parser ?? new StreamParser(format) : undefined;
+    const usageErr = stage.type === "agent" ? new StreamParser(format) : undefined;
+    const liveUsage = () => {
+      const u = usageOut?.usage ?? usageErr?.usage;
+      if (u && u !== step.usage) { step.usage = u; this.save(run); }
+    };
     let raw = "";
     const keep = (c: string) => { if (raw.length < 300_000) raw += c; };
     const proc = startProc({
@@ -571,13 +582,14 @@ export class Engine extends EventEmitter {
       cwd: run.worktree,
       env: { ...env, LOOPSMITH_RUN: run.id, LOOPSMITH_ISSUE: String(run.issue.number), LOOPSMITH_STAGE: stage.id, ...(handoffFile ? { LOOPSMITH_HANDOFF_FILE: handoffFile } : {}), ...(questionFile ? { LOOPSMITH_QUESTION_FILE: questionFile } : {}) },
       timeoutMs: stage.timeoutMinutes ? stage.timeoutMinutes * 60_000 : undefined,
-      onStdout: (c) => { keep(c); parser?.push(c); this.log(run, step.index, c, "out"); },
-      onStderr: (c) => { keep(c); this.log(run, step.index, c, "err"); },
+      onStdout: (c) => { keep(c); usageOut?.push(c); this.log(run, step.index, c, "out"); liveUsage(); },
+      onStderr: (c) => { keep(c); usageErr?.push(c); this.log(run, step.index, c, "err"); liveUsage(); },
     });
     this.procs.set(run.id, proc);
     const res = await proc.done;
     this.procs.delete(run.id);
-    parser?.flush();
+    usageOut?.flush();
+    usageErr?.flush();
 
     let output = parser?.result ?? res.stdout;
     if (outputFile && fs.existsSync(outputFile)) {
@@ -590,6 +602,18 @@ export class Engine extends EventEmitter {
     step.exitCode = res.code;
     step.output = output;
     step.costUsd = parser?.costUsd;
+    if (stage.type === "agent") {
+      const found = sessionPattern ? raw.match(new RegExp(sessionPattern))?.[1] : undefined;
+      step.sessionId = found ?? sessionId;
+      const u = usageOut?.usage ?? usageErr?.usage;
+      step.usage = u;
+      if (u && (usageOut?.cumulative || usageErr?.cumulative)) {
+        // A running session total: subtract what earlier steps of the same session already counted.
+        step.sessionUsage = u;
+        const before = step.sessionId ? [...run.steps].reverse().find((x) => x.index < step.index && x.sessionId === step.sessionId && x.sessionUsage)?.sessionUsage : undefined;
+        if (before) step.usage = usageSince(u, before) ?? u;
+      }
+    }
     run.outputs[stage.id] = output;
 
     if (res.killed && run.status !== "running") { step.status = "stopped"; return "fail"; }
@@ -598,9 +622,6 @@ export class Engine extends EventEmitter {
 
     if (stage.type === "agent") {
       const s = stage as AgentStage;
-      const found = sessionPattern ? raw.match(new RegExp(sessionPattern))?.[1] : undefined;
-      step.sessionId = found ?? sessionId;
-
       const question = questionFile && res.code === 0 && fs.existsSync(questionFile) ? fs.readFileSync(questionFile, "utf8").trim() : "";
       if (question) {
         step.question = question.slice(0, 8000);

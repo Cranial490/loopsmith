@@ -268,6 +268,7 @@ function HarnessesForm({ harnesses, onChange }: { harnesses: Record<string, Harn
               <select value={h.format ?? "text"} onChange={(e) => set(k, { format: e.target.value as any })}>
                 <option value="text">text</option>
                 <option value="claude-stream-json">claude-stream-json</option>
+                <option value="codex-json">codex-json</option>
               </select>
             </label>
             <div className="row end"><button className="ghost small danger" onClick={() => { const n = { ...harnesses }; delete n[k]; onChange(n); }}>Remove harness</button></div>

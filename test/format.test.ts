@@ -7,7 +7,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { formatLog, LogFormatter, type Block } from "../web/src/format.ts";
 import { Markdown } from "../web/src/Markdown.tsx";
-import { ClaudeStreamParser } from "../server/streams.ts";
+import { StreamParser } from "../server/streams.ts";
 import { Engine } from "../server/engine.ts";
 import { DemoHost } from "../server/demo.ts";
 import { defaultConfig } from "../server/config.ts";
@@ -143,7 +143,7 @@ test("Markdown renders lists, links, code; never raw HTML or unsafe links", () =
 });
 
 test("server keeps the Claude result/cost; formatting is not in the pipeline path", () => {
-  const p = new ClaudeStreamParser();
+  const p = new StreamParser();
   for (const c of claudeStream.match(/[\s\S]{1,5}/g)!) p.push(c);
   p.flush();
   assert.equal(p.result, "Done. Opened PR #7.");

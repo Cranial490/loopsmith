@@ -101,10 +101,19 @@ Defaults (the Codex and Pi flags are from their docs and are not tested here; ch
 | id | new session | continue a session |
 |---|---|---|
 | claude | `claude -p <prompt> --dangerously-skip-permissions --output-format stream-json --verbose` | `… --resume <id>` |
-| codex | `codex exec --dangerously-bypass-approvals-and-sandbox --output-last-message <file> <prompt>` | `codex exec <flags> resume <id> <prompt>` |
+| codex | `codex exec --json --dangerously-bypass-approvals-and-sandbox --output-last-message <file> <prompt>` | `codex exec <flags> resume <id> <prompt>` |
 | pi | `pi -p --session-id <new id> <prompt>` | `pi -p --session <id> <prompt>` |
 
 If your Pi version does not know `--session-id`, remove that flag and the `resumeArgs`. loopsmith then uses the fallback `pi -c -p`.
+
+### Token usage
+
+Each agent step shows the tokens its CLI reported: input, output, cache read, cache write and a **total = input + cache read + cache write + output**. "input" never contains cached tokens, so nothing is counted twice. A stage shows its total over all attempts and review rounds, and the run shows its total; "(incomplete)" means some step reported nothing (failed, stopped, still running, an older run) or only a live estimate. Shell and approval steps have no token usage. Token counts are not a charge, and the dollar cost stays a separate number.
+
+- **Claude Code** (`claude-stream-json`): the `result` event's `usage` is the usage of that one `claude -p` process, also when it resumes a session. `input_tokens` excludes cache, `cache_read_input_tokens` / `cache_creation_input_tokens` are the cache read / write. While it runs, the `assistant` events give a live estimate (each message counted once, by message id); the final `result` replaces it.
+- **Codex** (`codex-json`, `codex exec --json`): `turn.completed.usage` is the running total of the whole Codex session, and its `input_tokens` includes `cached_input_tokens`. loopsmith stores this total and subtracts the total of the earlier step in the same session, so a resumed session is not counted twice. Usage appears when the turn completes.
+- **Codex text output** (older configs without `--json`): only the `tokens used` number (a session running total; Codex counts it without cached input), shown as a total without a breakdown. Older saved configs with the untouched default Codex args are upgraded to `--json` automatically.
+- Custom harnesses report no usage unless they use one of these formats.
 
 ## Safety
 

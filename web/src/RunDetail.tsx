@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, onLog, onReconnect, STATUS_LABEL, duration, totalCost, type Run, type Config, type LogEvent } from "./api";
+import { api, onLog, onReconnect, STATUS_LABEL, duration, totalCost, sumUsage, tokens, type Run, type Config, type LogEvent, type Step } from "./api";
 import { Stepper, ScoreTrail } from "./RunCard";
 import { LogFormatter, type Block, type Chunk } from "./format";
 import { Markdown } from "./Markdown";
@@ -42,6 +42,7 @@ export function RunDetail({ run, config, onBack }: { run: Run; config: Config; o
         {run.issue.url && <a href={run.issue.url} target="_blank">Issue ↗</a>}
         <ScoreTrail run={run} />
         {totalCost(run) > 0 && <span className="muted">cost ${totalCost(run).toFixed(2)}</span>}
+        <UsageTotal steps={run.steps} label="tokens" />
         <span className="muted">{run.options.autoApprove ? "hands-off" : "approval required"}</span>
         <span className="muted" title={run.worktree}>worktree: {run.worktree.split("/").slice(-2).join("/")}</span>
         <div className="actions">
@@ -98,6 +99,7 @@ export function RunDetail({ run, config, onBack }: { run: Run; config: Config; o
                 <div className="t-meta">
                   {harnessOf(s.harness) || s.type}
                   {" · "}{s.status === "waiting" ? "waiting" : duration(s.startedAt, s.endedAt)}
+                  {s.usage && <span title={usageTitle(s.usage)}> · {tokens(s.usage.total)} tok{s.usage.partial ? "*" : ""}</span>}
                   {s.vars?.score !== undefined && <> · <b>score {s.vars.score}</b></>}
                   {s.question && <span className="handoff-mark" title={s.answer ? `Q: ${s.question}\n\nA: ${s.answer}` : s.question}> · asked you</span>}
                   {s.handoff && <span className="handoff-mark" title="Wrote a handoff note"> · note</span>}
@@ -198,6 +200,10 @@ function StepView({ run, index, harness, follow, setFollow }: { run: Run; index:
         {harness && <span>harness: <b>{harness}</b></span>}
         {step.exitCode !== undefined && <span>exit: {String(step.exitCode)}</span>}
         {step.costUsd !== undefined && <span>cost: ${step.costUsd.toFixed(2)}</span>}
+        {step.type === "agent" && <StepUsage step={step} />}
+        {step.type === "agent" && run.steps.filter((s) => s.stageId === step.stageId && s.type === "agent").length > 1 && (
+          <UsageTotal steps={run.steps.filter((s) => s.stageId === step.stageId)} label={`stage total (${run.steps.filter((s) => s.stageId === step.stageId && s.type === "agent").length} attempts)`} />
+        )}
         {step.sessionId && <span title={step.sessionId}>session: {step.sessionId.slice(0, 8)}</span>}
         <span>time: {duration(step.startedAt, step.endedAt)}</span>
         {step.vars && Object.entries(step.vars).map(([k, v]) => <span key={k}>{k}: <b>{String(v)}</b></span>)}
@@ -270,5 +276,33 @@ function LogBlocks({ blocks, running }: { blocks: Block[]; running: boolean }) {
         }
       })}
     </>
+  );
+}
+
+const usageTitle = (u: NonNullable<Step["usage"]>) =>
+  [`input (not cached): ${u.input ?? "not reported"}`, `cache read: ${u.cacheRead ?? "not reported"}`, `cache write: ${u.cacheWrite ?? "not reported"}`, `output: ${u.output ?? "not reported"}`,
+    `total = input + cache read + cache write + output = ${u.total}`, ...(u.partial ? ["live estimate: the CLI's final usage was not seen"] : []), "Token counts only, not a charge."].join("\n");
+
+/** One step's token usage, as the CLI reported it. Missing usage is shown as such, never as 0. */
+function StepUsage({ step }: { step: Step }) {
+  const u = step.usage;
+  if (!u) return <span className="muted" title="The CLI reported no token usage for this step">tokens: {step.status === "running" ? "pending until the result" : "not reported"}</span>;
+  const parts = ([["in", u.input], ["out", u.output], ["cache read", u.cacheRead], ["cache write", u.cacheWrite]] as const).filter(([, n]) => n !== undefined);
+  return (
+    <span title={usageTitle(u)}>
+      tokens: {parts.map(([k, n]) => `${k} ${n!.toLocaleString()}`).join(" · ")}{parts.length ? " · " : ""}<b>total {u.total.toLocaleString()}</b>
+      {u.partial && <span className="muted">{step.status === "running" ? " (live, so far)" : " (incomplete: no final result)"}</span>}
+    </span>
+  );
+}
+
+function UsageTotal({ steps, label }: { steps: Step[]; label: string }) {
+  const t = sumUsage(steps);
+  if (!t || (!t.steps && !t.incomplete)) return null;
+  if (!t.steps) return <span className="muted">{label}: not reported</span>;
+  return (
+    <span className="muted" title={`${usageTitle(t)}\n${t.steps} step(s) with reported usage${t.incomplete ? "; some steps have no or partial usage, so this total is too low" : ""}`}>
+      {label}: <b>{tokens(t.total)}</b>{t.incomplete && " (incomplete)"}
+    </span>
   );
 }
