@@ -35,7 +35,7 @@ You can also link it: `npm link`, then run `loopsmith` inside any repo.
   - `approval`: waits for you in the UI. In **hands-off** mode (a checkbox when you start runs) it passes on its own.
 - **Safety limits.** `maxRuns` on a stage stops endless loops. The run goes to *needs attention*, and you can resume it with the limits reset.
 - **Restart-safe.** State is in `<repo>/.loopsmith/` (git-ignored). If loopsmith stops, running runs show as *interrupted*. Press *Resume* to run that stage again.
-- **Live view.** Every stage streams its log to the UI. Claude's JSON stream is shown as readable lines (`→ Bash npm test`, `→ Edit src/x.ts`, …). You can also see the exact prompt and the final output of each step.
+- **Live view.** Every stage streams its log to the UI. Claude Code and Codex output is formatted: agent messages (Markdown), expandable tool calls and commands, highlighted errors, and folded startup noise. A Raw toggle shows the original stdout/stderr, which is always saved, and you can copy it. You can also see the exact prompt and the final output of each step.
 
 ## Handoff notes between agents
 

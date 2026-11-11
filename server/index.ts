@@ -51,8 +51,7 @@ app.post("/api/runs/:id/stop", wrap((req) => engine.stop(String(req.params.id)))
 app.post("/api/runs/:id/resume", wrap((req) => engine.resume(String(req.params.id), { resetLimits: !!req.body?.resetLimits, fromStage: req.body?.fromStage || undefined })));
 app.delete("/api/runs/:id", wrap((req) => engine.remove(String(req.params.id))));
 app.get("/api/runs/:id/steps/:index/log", (req, res) => {
-  const p = engine.logPath(String(req.params.id), Number(req.params.index));
-  res.type("text/plain").send(fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "");
+  res.json(engine.readLog(String(req.params.id), Number(req.params.index)));
 });
 app.put("/api/config", wrap((req) => {
   const next = req.body as Config;

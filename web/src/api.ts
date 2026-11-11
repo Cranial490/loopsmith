@@ -1,6 +1,7 @@
 import type { Run } from "../../server/engine";
 import type { Config, Stage, HarnessConfig } from "../../server/config";
 import type { Issue } from "../../server/github";
+import type { Chunk } from "./format";
 export type { Run, Config, Stage, HarnessConfig, Issue };
 
 async function call<T>(method: string, url: string, body?: unknown): Promise<T> {
@@ -20,14 +21,18 @@ export const api = {
   sendBack: (id: string, notes: string) => call("POST", `/api/runs/${id}/send-back`, { notes }),
   resume: (id: string, resetLimits = false, fromStage?: string) => call("POST", `/api/runs/${id}/resume`, { resetLimits, fromStage }),
   remove: (id: string) => call("DELETE", `/api/runs/${id}`),
-  log: (id: string, index: number) => fetch(`/api/runs/${id}/steps/${index}/log`).then((r) => r.text()),
+  log: (id: string, index: number) => call<Chunk[]>("GET", `/api/runs/${id}/steps/${index}/log`),
   saveConfig: (cfg: Config) => call<Config>("PUT", "/api/config", cfg),
   defaultConfig: () => call<Config>("GET", "/api/config/default"),
 };
 
-type LogEvent = { runId: string; index: number; text: string };
+/** A live log chunk. `n` is its position in the saved log, so gaps and repeats can be spotted. */
+export type LogEvent = Chunk & { runId: string; index: number; n: number };
 const logListeners = new Set<(e: LogEvent) => void>();
 export const onLog = (fn: (e: LogEvent) => void) => { logListeners.add(fn); return () => { logListeners.delete(fn); }; };
+/** Called when the event stream connects again; live events sent meanwhile were missed. */
+const reconnectListeners = new Set<() => void>();
+export const onReconnect = (fn: () => void) => { reconnectListeners.add(fn); return () => { reconnectListeners.delete(fn); }; };
 
 export function connectEvents(handlers: { run: (r: Run) => void; removed: (id: string) => void; config: (c: Config) => void; status: (ok: boolean) => void }) {
   const es = new EventSource("/api/events");
@@ -35,7 +40,8 @@ export function connectEvents(handlers: { run: (r: Run) => void; removed: (id: s
   es.addEventListener("removed", (e) => handlers.removed(JSON.parse((e as MessageEvent).data).id));
   es.addEventListener("config", (e) => handlers.config(JSON.parse((e as MessageEvent).data)));
   es.addEventListener("log", (e) => { const d = JSON.parse((e as MessageEvent).data); logListeners.forEach((f) => f(d)); });
-  es.onopen = () => handlers.status(true);
+  let opened = false;
+  es.onopen = () => { handlers.status(true); if (opened) reconnectListeners.forEach((f) => f()); opened = true; };
   es.onerror = () => handlers.status(false);
   return () => es.close();
 }
