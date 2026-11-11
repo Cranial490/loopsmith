@@ -1,3 +1,6 @@
+import type { Stage } from "./config.js";
+
+
 /** Replace {{a.b.c}} with values from ctx. Missing values become "". */
 export function render(tpl: string, ctx: Record<string, any>): string {
   return tpl.replace(/\{\{\s*([\w.-]+)\s*\}\}/g, (_, key: string) => {
@@ -56,4 +59,25 @@ export function extractVars(text: string, extract: Record<string, string> = {}) 
     }
   }
   return out;
+}
+
+/** Rename a stage and every reference to it (goto, continueFrom, sendBackTo, {{stages.<id>.output}}). */
+export function renameStage(pipeline: Stage[], oldId: string, newId: string): Stage[] {
+  const id = (x: string) => (x === oldId ? newId : x);
+  const ref = new RegExp(`(\\{\\{\\s*stages\\.)${oldId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\.output\\s*\\}\\})`, "g");
+  const tpl = (t: string) => t.replace(ref, (_, a, b) => a + newId + b);
+  return pipeline.map((s) => {
+    const r: any = { ...s, id: id(s.id) };
+    if (s.next) r.next = s.next.map((t) => ({ ...t, goto: id(t.goto) }));
+    if (s.type === "agent") {
+      r.prompt = tpl(s.prompt);
+      if (s.continueFrom) r.continueFrom = s.continueFrom.map(id);
+    }
+    if (s.type === "shell") r.command = tpl(s.command);
+    if (s.type === "approval") {
+      if (s.message) r.message = tpl(s.message);
+      if (s.sendBackTo) r.sendBackTo = id(s.sendBackTo);
+    }
+    return r;
+  });
 }

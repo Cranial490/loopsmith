@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type Config, type Stage, type HarnessConfig } from "./api";
+import { renameStage } from "../../server/template.js";
 
 const VARS = ["handoff", "issue.number", "issue.title", "issue.body", "branch", "baseBranch", "pr.number", "pr.url", "iteration", "vars.<name>", "stages.<id>.output"];
 
@@ -15,14 +16,8 @@ export function PipelineEditor({ config, onSaved }: { config: Config; onSaved: (
   const setStage = (id: string, patch: Partial<Stage>) =>
     setDraft((d) => ({ ...d, pipeline: d.pipeline.map((s) => (s.id === id ? ({ ...s, ...patch } as Stage) : s)) }));
 
-  const renameStage = (oldId: string, newId: string) => {
-    setDraft((d) => ({
-      ...d,
-      pipeline: d.pipeline.map((s) => ({
-        ...(s.id === oldId ? { ...s, id: newId } : s),
-        next: s.next?.map((t) => (t.goto === oldId ? { ...t, goto: newId } : t)),
-      })) as Stage[],
-    }));
+  const rename = (oldId: string, newId: string) => {
+    setDraft((d) => ({ ...d, pipeline: renameStage(d.pipeline, oldId, newId) }));
     setSel(newId);
   };
 
@@ -119,7 +114,7 @@ export function PipelineEditor({ config, onSaved }: { config: Config; onSaved: (
           <div className="editor">
             {stage ? (
               <StageForm key={stage.id} stage={stage} ids={ids} harnesses={draft.harnesses}
-                onChange={(p) => setStage(stage.id, p)} onRename={(n) => renameStage(stage.id, n)}
+                onChange={(p) => setStage(stage.id, p)} onRename={(n) => rename(stage.id, n)}
                 onMove={(d) => move(stage.id, d)} onDelete={() => del(stage.id)} />
             ) : <div className="muted">Select a stage.</div>}
             <HarnessesForm harnesses={draft.harnesses} onChange={(h) => setDraft({ ...draft, harnesses: h })} />
