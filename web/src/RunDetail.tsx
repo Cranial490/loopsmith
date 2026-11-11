@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, onLog, STATUS_LABEL, duration, totalCost, type Run, type Config } from "./api";
+import { api, onLog, onReconnect, STATUS_LABEL, duration, totalCost, type Run, type Config, type LogEvent } from "./api";
 import { Stepper, ScoreTrail } from "./RunCard";
 import { LogFormatter, type Block, type Chunk } from "./format";
 import { Markdown } from "./Markdown";
@@ -122,16 +122,50 @@ function StepView({ run, index, harness, follow, setFollow }: { run: Run; index:
   const ref = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
 
+  const running = step.status === "running";
+  const runningRef = useRef(running);
+  runningRef.current = running;
+
   useEffect(() => {
-    let cancelled = false, loaded = false;
+    let cancelled = false, loading = false, gen = 0;
+    let queued: LogEvent[] = [];
+    const add = (c: Chunk) => { log.current.chunks.push({ s: c.s, t: c.t }); log.current.fmt.push(c); };
+    // Live chunks are applied in order: repeats (already loaded) are skipped, a gap reloads the log.
+    const apply = (e: LogEvent) => {
+      if (e.n < log.current.chunks.length) return;
+      if (e.n > log.current.chunks.length) return load();
+      add(e);
+    };
+    const load = () => {
+      const my = ++gen;
+      loading = true;
+      queued = [];
+      api.log(run.id, index).then((cs) => {
+        if (cancelled || my !== gen) return;
+        log.current = { chunks: [], fmt: new LogFormatter() };
+        cs.forEach(add);
+        loading = false;
+        const q = queued.sort((x, y) => x.n - y.n);
+        queued = [];
+        q.forEach(apply);
+        if (!loading && !runningRef.current) log.current.fmt.end();
+        setTick((t) => t + 1);
+      }, () => { if (my === gen) loading = false; });
+    };
     log.current = { chunks: [], fmt: new LogFormatter() };
     setTick((t) => t + 1);
-    const add = (c: Chunk) => { log.current.chunks.push(c); log.current.fmt.push(c); };
-    api.log(run.id, index).then((cs) => { if (cancelled) return; cs.forEach(add); loaded = true; setTick((t) => t + 1); });
-    // Live chunks that arrive before the saved log loads are already in it.
-    const off = onLog((e) => { if (loaded && e.runId === run.id && e.index === index) { add({ s: e.s, t: e.t }); setTick((t) => t + 1); } });
-    return () => { cancelled = true; off(); };
+    load();
+    const off = onLog((e) => {
+      if (e.runId !== run.id || e.index !== index) return;
+      if (loading) queued.push(e);
+      else { apply(e); setTick((t) => t + 1); }
+    });
+    const offRe = onReconnect(load);
+    return () => { cancelled = true; off(); offRe(); };
   }, [run.id, index]);
+
+  // The step ended: show lines that never got a final newline.
+  useEffect(() => { if (!running) { log.current.fmt.end(); setTick((t) => t + 1); } }, [running]);
 
   // Follow the newest output, unless the user scrolled up to read.
   useEffect(() => {
@@ -173,7 +207,7 @@ function StepView({ run, index, harness, follow, setFollow }: { run: Run; index:
         {view === "log"
           ? raw
             ? <pre className="raw">{log.current.chunks.map((c, i) => <span key={i} className={c.s}>{c.t}</span>)}</pre>
-            : <LogBlocks blocks={log.current.fmt.blocks()} running={step.status === "running"} />
+            : <LogBlocks blocks={log.current.fmt.blocks()} running={running} />
           : !text
             ? <span className="muted">{view === "output" ? "(no output yet)" : ""}</span>
             : raw || view === "prompt" ? <pre className="raw">{text}</pre> : <Markdown text={text} />}
@@ -210,6 +244,7 @@ function LogBlocks({ blocks, running }: { blocks: Block[]; running: boolean }) {
               <details key={i} className={`blk tool ${state}`}>
                 <summary><span className="lbl">{b.name}</span><code>{b.summary}</code><span className="state">{b.error ? "✗ failed" : b.result !== undefined ? "✓" : running && i === blocks.length - 1 ? "…" : ""}</span></summary>
                 <Full label={b.name === "Command" || b.name === "Shell" || b.name === "Bash" ? "Command" : "Input"} text={b.detail} />
+                {b.input && <Full label="All arguments" text={b.input} />}
                 {b.result !== undefined && <Full label="Result" text={b.result || "(empty)"} />}
               </details>
             );

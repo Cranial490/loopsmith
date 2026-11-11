@@ -26,9 +26,13 @@ export const api = {
   defaultConfig: () => call<Config>("GET", "/api/config/default"),
 };
 
-type LogEvent = Chunk & { runId: string; index: number };
+/** A live log chunk. `n` is its position in the saved log, so gaps and repeats can be spotted. */
+export type LogEvent = Chunk & { runId: string; index: number; n: number };
 const logListeners = new Set<(e: LogEvent) => void>();
 export const onLog = (fn: (e: LogEvent) => void) => { logListeners.add(fn); return () => { logListeners.delete(fn); }; };
+/** Called when the event stream connects again; live events sent meanwhile were missed. */
+const reconnectListeners = new Set<() => void>();
+export const onReconnect = (fn: () => void) => { reconnectListeners.add(fn); return () => { reconnectListeners.delete(fn); }; };
 
 export function connectEvents(handlers: { run: (r: Run) => void; removed: (id: string) => void; config: (c: Config) => void; status: (ok: boolean) => void }) {
   const es = new EventSource("/api/events");
@@ -36,7 +40,8 @@ export function connectEvents(handlers: { run: (r: Run) => void; removed: (id: s
   es.addEventListener("removed", (e) => handlers.removed(JSON.parse((e as MessageEvent).data).id));
   es.addEventListener("config", (e) => handlers.config(JSON.parse((e as MessageEvent).data)));
   es.addEventListener("log", (e) => { const d = JSON.parse((e as MessageEvent).data); logListeners.forEach((f) => f(d)); });
-  es.onopen = () => handlers.status(true);
+  let opened = false;
+  es.onopen = () => { handlers.status(true); if (opened) reconnectListeners.forEach((f) => f()); opened = true; };
   es.onerror = () => handlers.status(false);
   return () => es.close();
 }

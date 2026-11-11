@@ -8,7 +8,7 @@ export type Chunk = { s: "out" | "err" | "sys"; t: string };
 export type Block =
   | { kind: "message"; text: string }
   | { kind: "thinking"; text: string }
-  | { kind: "tool"; id?: string; name: string; summary: string; detail: string; result?: string; error?: boolean }
+  | { kind: "tool"; id?: string; name: string; summary: string; detail: string; input?: string; result?: string; error?: boolean }
   | { kind: "output"; text: string }
   | { kind: "error"; title: string; detail?: string }
   | { kind: "warn"; text: string }
@@ -37,13 +37,24 @@ export class LogFormatter {
     for (const l of lines) this.line(l.replace(/\r$/, ""));
   }
 
-  /** The blocks so far, plus unfinished plain-text lines so live output shows at once. */
+  /** The step ended: lines without a final newline are complete now. */
+  end() {
+    for (const s of ["out", "err"] as const) {
+      const rest = this.buf[s];
+      this.buf[s] = "";
+      if (rest) this.line(rest.replace(/\r$/, ""));
+    }
+  }
+
+  /** The blocks so far, plus unfinished lines so live output shows at once. */
   blocks(): Block[] {
     const out = [...this.list];
     for (const p of [this.buf.out, this.buf.err]) {
-      if (!p || this.section || p.trimStart().startsWith("{")) continue;
+      if (!p || p.trimStart().startsWith("{")) continue; // a JSON event still arriving
       const last = out.at(-1);
-      if (last?.kind === "output") out[out.length - 1] = { kind: "output", text: last.text + p };
+      if ((this.section === "codex" || this.section === "thinking") && (last?.kind === "message" || last?.kind === "thinking")) out[out.length - 1] = { ...last, text: last.text + p };
+      else if (this.section) continue;
+      else if (last?.kind === "output") out[out.length - 1] = { kind: "output", text: last.text + p };
       else out.push({ kind: "output", text: p });
     }
     return out;
@@ -70,7 +81,7 @@ export class LogFormatter {
     if (raw.trimStart().startsWith("{")) {
       let ev: any;
       try { ev = JSON.parse(raw); } catch {}
-      if (ev && typeof ev.type === "string" && this.event(ev)) return;
+      if (ev && typeof ev.type === "string" && this.event(ev)) { this.section = null; return; }
     }
     const bare = raw.replace(TS, "");
     const header = CODEX_HEADERS[bare.trim()];
@@ -132,7 +143,6 @@ export class LogFormatter {
 
   /** Structured CLI events. Returns false for unknown events (shown as plain text). */
   private event(ev: any): boolean {
-    this.section = null;
     switch (ev.type) {
       // Claude Code stream-json
       case "system":
@@ -144,7 +154,7 @@ export class LogFormatter {
           if (c.type === "text" && /^API Error/.test(c.text)) this.add({ kind: "error", title: readableError(c.text), detail: c.text });
           else if (c.type === "text") this.add({ kind: "message", text: c.text });
           else if (c.type === "thinking" && c.thinking) this.add({ kind: "thinking", text: c.thinking });
-          else if (c.type === "tool_use") this.add({ kind: "tool", id: c.id, name: c.name, summary: summarize(c.input), detail: typeof c.input?.command === "string" ? c.input.command : JSON.stringify(c.input, null, 2) });
+          else if (c.type === "tool_use") this.add({ kind: "tool", id: c.id, name: c.name, summary: summarize(c.input), ...toolDetail(c.input) });
         }
         return true;
       case "user":
@@ -204,6 +214,13 @@ export function readableError(s: string): string {
     } catch {}
   }
   return s.replace(ERROR, "").trim() || s;
+}
+
+/** The command itself when there is one, and the full input with every argument. */
+function toolDetail(input: any): { detail: string; input?: string } {
+  const all = JSON.stringify(input, null, 2) ?? "";
+  if (typeof input?.command !== "string") return { detail: all };
+  return Object.keys(input).length > 1 ? { detail: input.command, input: all } : { detail: input.command };
 }
 
 function text(c: unknown): string {

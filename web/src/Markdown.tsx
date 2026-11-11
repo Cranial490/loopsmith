@@ -26,7 +26,7 @@ export function Markdown({ text }: { text: string }) {
       out.push(<pre key={k}><code className={fence[2] ? `lang-${fence[2]}` : undefined}>{body.join("\n")}</code></pre>);
       continue;
     }
-    const h = /^(#{1,6})\s+(.*)$/.exec(line);
+    const h = /^\s*(#{1,6})\s+(.*)$/.exec(line);
     if (h) {
       const H = `h${h[1].length}` as "h1";
       out.push(<H key={k}>{inline(h[2])}</H>);
@@ -39,15 +39,17 @@ export function Markdown({ text }: { text: string }) {
       out.push(<ol key={k} start={start !== 1 ? start : undefined}>{take(/^\s*\d+[.)]\s+(.*)$/).map((t, j) => <li key={j}>{inline(t)}</li>)}</ol>);
       continue;
     }
-    if (/^>\s?/.test(line)) { out.push(<blockquote key={k}>{inline(take(/^>\s?(.*)$/).join("\n"))}</blockquote>); continue; }
+    if (/^\s*>/.test(line)) { out.push(<blockquote key={k}>{inline(take(/^\s*>\s?(.*)$/).join("\n"))}</blockquote>); continue; }
     if (!line.trim()) { i++; continue; }
-    const para: string[] = [];
-    while (i < lines.length && lines[i].trim() && !/^\s*(```|~~~|#{1,6}\s|[-*+]\s|\d+[.)]\s|>)/.test(lines[i])) para.push(lines[i++]);
+    // The first line is always taken, so the loop always moves on.
+    const para = [lines[i++]];
+    while (i < lines.length && lines[i].trim() && !BLOCK_START.test(lines[i])) para.push(lines[i++]);
     out.push(<p key={k}>{inline(para.join("\n"))}</p>);
   }
   return <div className="md">{out}</div>;
 }
 
+const BLOCK_START = /^\s*(```|~~~|#{1,6}\s|[-*+]\s|\d+[.)]\s|>)/;
 const INLINE = /`([^`]+)`|\*\*([^*]+)\*\*|\[([^\]]+)\]\(([^)\s]+)\)|(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])|(?<![\w*])[*_]([^*_\s][^*_]*)[*_](?![\w*])/g;
 
 function inline(s: string): ReactNode[] {

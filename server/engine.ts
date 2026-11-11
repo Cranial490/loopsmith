@@ -145,12 +145,17 @@ export class Engine extends EventEmitter {
     return fs.existsSync(old) ? [{ s: "out", t: fs.readFileSync(old, "utf8") }] : [];
   }
 
+  /** Chunks written per log file, so live events carry their position (`n`) and clients can spot gaps. */
+  private logCounts = new Map<string, number>();
+
   private log(run: Run, index: number, text: string, s: LogChunk["s"] = "sys") {
     if (!text) return;
     const p = path.join(this.dataDir, "logs", run.id, `${index}.jsonl`);
     fs.mkdirSync(path.dirname(p), { recursive: true });
+    const n = this.logCounts.get(p) ?? (fs.existsSync(p) ? fs.readFileSync(p, "utf8").split("\n").length - 1 : 0);
     fs.appendFileSync(p, JSON.stringify({ s, t: text }) + "\n");
-    this.emit("log", { runId: run.id, index, s, t: text });
+    this.logCounts.set(p, n + 1);
+    this.emit("log", { runId: run.id, index, s, t: text, n });
   }
 
   // ---------- public actions ----------

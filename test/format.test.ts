@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { formatLog, type Block } from "../web/src/format.ts";
+import { formatLog, LogFormatter, type Block } from "../web/src/format.ts";
 import { Markdown } from "../web/src/Markdown.tsx";
 import { ClaudeStreamParser } from "../server/streams.ts";
 import { Engine } from "../server/engine.ts";
@@ -162,4 +162,48 @@ test("engine saves the original stdout/stderr per stream; old .log files are sti
   fs.mkdirSync(path.join(repo, ".loopsmith/logs/old"), { recursive: true });
   fs.writeFileSync(path.join(repo, ".loopsmith/logs/old/0.log"), "plain old log\n");
   assert.deepEqual(engine.readLog("old", 0), [{ s: "out", t: "plain old log\n" }]);
+});
+
+test("Markdown: indented headings and quotes render and never hang", () => {
+  const html = renderToStaticMarkup(createElement(Markdown, { text: "  # Heading\n  > quote\ntext\n   ```\ncode\n   ```" }));
+  assert.match(html, /<h1>Heading<\/h1>/);
+  assert.match(html, /<blockquote>quote<\/blockquote>/);
+  assert.match(html, /<pre><code>code<\/code><\/pre>/);
+});
+
+test("unterminated output: partial Codex text shows live; end() flushes the rest", () => {
+  const f = new LogFormatter();
+  f.push({ s: "err", t: "OpenAI Codex v1\n--------\nmodel: m\n--------\ncodex\nfinal ans" });
+  assert.equal((f.blocks().at(-1) as any).text, "final ans");
+  f.end();
+  assert.equal((f.blocks().at(-1) as any).text, "final ans\n");
+  // An unknown JSON event without a newline is hidden while it may still be arriving, then shown.
+  const g = new LogFormatter();
+  g.push({ s: "out", t: '{"type":"mystery"}' });
+  assert.deepEqual(g.blocks(), []);
+  g.end();
+  assert.deepEqual(g.blocks(), [{ kind: "output", text: '{"type":"mystery"}\n' }]);
+});
+
+test("expanded Claude tool calls keep every argument", () => {
+  const blocks = formatLog([{ s: "out", t: j({ type: "assistant", message: { content: [{ type: "tool_use", id: "t", name: "Bash", input: { command: "npm test", timeout: 600000, run_in_background: true } }] } }) }]);
+  const tool = blocks[0] as Extract<Block, { kind: "tool" }>;
+  assert.equal(tool.detail, "npm test");
+  assert.match(tool.input!, /"timeout": 600000/);
+  assert.match(tool.input!, /"run_in_background": true/);
+});
+
+test("live log events carry their chunk position, also after a restart", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "ls-seq-"));
+  const cfg = defaultConfig();
+  const seen: number[] = [];
+  const a = new Engine(repo, () => cfg, new DemoHost());
+  a.on("log", (e) => seen.push(e.n));
+  (a as any).log({ id: "r" }, 0, "x", "out");
+  (a as any).log({ id: "r" }, 0, "y", "err");
+  const b = new Engine(repo, () => cfg, new DemoHost());
+  b.on("log", (e) => seen.push(e.n));
+  (b as any).log({ id: "r" }, 0, "z", "out");
+  assert.deepEqual(seen, [0, 1, 2]);
+  assert.equal(b.readLog("r", 0).length, 3);
 });
