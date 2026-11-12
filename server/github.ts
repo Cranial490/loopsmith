@@ -11,6 +11,7 @@ export interface GitHost {
   /** The tickets of spec `spec`, open and closed, with `state` and `blockedBy` set. */
   listTickets(spec: number): Promise<Issue[]>;
   findPr(branch: string): Promise<PullRequest | undefined>;
+  createPr(pr: { head: string; base: string; title: string; body: string }): Promise<PullRequest>;
 }
 
 /** Talks to GitHub through the `gh` CLI, so it uses your existing gh login. */
@@ -71,6 +72,11 @@ export class GhCli implements GitHost {
   async findPr(branch: string): Promise<PullRequest | undefined> {
     const out = await exec("gh", ["pr", "list", "--head", branch, "--state", "all", "--limit", "1", "--json", "number,url,state"], this.repo);
     return JSON.parse(out)[0];
+  }
+
+  async createPr(pr: { head: string; base: string; title: string; body: string }): Promise<PullRequest> {
+    const url = (await exec("gh", ["pr", "create", "--head", pr.head, "--base", pr.base, "--title", pr.title, "--body", pr.body], this.repo)).trim().split("\n").at(-1)!;
+    return { number: Number(url.match(/(\d+)$/)?.[1]), url };
   }
 }
 

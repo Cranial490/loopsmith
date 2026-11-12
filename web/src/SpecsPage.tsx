@@ -75,7 +75,7 @@ export function SpecsPage({ spec, refreshKey, config, onOpenRun, onCloseRun, run
     setImplementing(true);
     try {
       const made = await api.implementSpec(n);
-      setNote({ spec: n, text: made.length ? `Queued ${made.map((r) => `#${r.issue.number}`).join(", ")} hands-off. Follow them here or in the Runs view.` : "Nothing new to queue. Queued tickets now follow the current links and closed issues. Resume failed runs from the run itself." });
+      setNote({ spec: n, text: made.length ? `Queued ${made.map((r) => `#${r.issue.number}`).join(", ")} hands-off on branch spec/${n}. When all are done, a PR from spec/${n} into ${config.baseBranch} opens. Follow them here or in the Runs view.` : "Nothing new to queue. Queued tickets now follow the current links and closed issues. Resume failed runs from the run itself." });
     } catch (e: any) { setNote({ spec: n, text: e.message, bad: true }); }
     setImplementing(false);
     setReload((k) => k + 1); // the engine read GitHub again, so show what it saw

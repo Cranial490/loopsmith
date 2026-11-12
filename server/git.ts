@@ -33,6 +33,17 @@ export async function ensureWorktree(repo: string, dir: string, branch: string, 
   }
 }
 
+/** Make `branch` from `from` when it does not exist yet: on origin when there is one, else locally. */
+export async function ensureBranch(repo: string, branch: string, from: string) {
+  if (await ok("git", ["remote", "get-url", "origin"], repo)) {
+    if (await ok("git", ["ls-remote", "--exit-code", "--heads", "origin", branch], repo)) return;
+    await exec("git", ["fetch", "origin", from], repo);
+    await exec("git", ["push", "origin", `refs/remotes/origin/${from}:refs/heads/${branch}`], repo);
+  } else if (!(await ok("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], repo))) {
+    await exec("git", ["branch", branch, from], repo);
+  }
+}
+
 export async function removeWorktree(repo: string, dir: string) {
   if (fs.existsSync(dir)) await ok("git", ["worktree", "remove", "--force", dir], repo);
 }

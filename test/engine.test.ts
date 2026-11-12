@@ -794,3 +794,20 @@ test("implement a spec: Continue stops a queued run of a closed outside blocker"
   assert.deepEqual([r1.status, r1.steps.length], ["stopped", 0]);
   engine.shutdown();
 });
+
+test("implement a spec: tickets start from and merge into the spec branch, then one PR goes from it into main", async () => {
+  const host = new DemoHost();
+  const { repo, cfg } = makeRepo();
+  cfg.pipeline = [{ id: "s", type: "shell", command: "test {{baseBranch}} = spec/10 && test \"$(git rev-parse HEAD)\" = \"$(git rev-parse spec/10)\"" }];
+  const engine = new Engine(repo, () => cfg, host);
+  const runs = await engine.implementSpec(10);
+  assert.ok(runs.every((r) => r.spec === 10 && r.baseBranch === "spec/10"));
+  await waitFor(() => !!host.prs["spec/10"]);
+  assert.ok(runs.every((r) => r.status === "done"));
+  const pr = host.prs["spec/10"];
+  assert.deepEqual([pr.base, pr.head], ["main", "spec/10"]);
+  for (const n of [10, 11, 12, 13, 14]) assert.match(pr.body, new RegExp(`Closes #${n}\\n`));
+  assert.deepEqual(await engine.implementSpec(10), []); // pressing again opens no second PR
+  assert.equal(Object.keys(host.prs).length, 1);
+  engine.shutdown();
+});
