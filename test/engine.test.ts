@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { defaultConfig, validateConfig } from "../server/config.ts";
+import { defaultConfig, loadConfig, validateConfig } from "../server/config.ts";
 import { Engine, type Run } from "../server/engine.ts";
 import { DemoHost } from "../server/demo.ts";
 import { evalCondition, extractVars, render } from "../server/template.ts";
@@ -37,6 +37,24 @@ test("template + conditions", () => {
   assert.equal(evalCondition("score >= 8", { vars: {} }), false);
   assert.deepEqual(extractVars("SCORE: 4/10\n...\nSCORE: 8.5 / 10", { score: "SCORE:\\s*(\\d+(?:\\.\\d+)?)\\s*/\\s*10" }), { score: 8.5 });
   assert.deepEqual(validateConfig(defaultConfig()), []);
+});
+
+test("default score regex reads the ways agents write a score", () => {
+  const ex = (defaultConfig().pipeline.find((s) => s.id === "review") as any).extract;
+  for (const t of ["SCORE: 8/10", "Score 8/10.", "**Score:** 8/10", "## Score: 8 / 10", "score = 8/10"]) {
+    assert.deepEqual(extractVars(`review...\n${t}\n`, ex), { score: 8 }, t);
+  }
+  assert.deepEqual(extractVars("no score here, 3/10 tests fail", ex), {});
+});
+
+test("loadConfig upgrades the old default score regex", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "ls-cfg-"));
+  const cfg = defaultConfig();
+  const review = cfg.pipeline.find((s) => s.id === "review") as any;
+  review.extract = { score: "SCORE:\\s*(\\d+(?:\\.\\d+)?)\\s*/\\s*10" };
+  fs.writeFileSync(path.join(repo, "loopsmith.config.json"), JSON.stringify(cfg));
+  const got = loadConfig(repo).pipeline.find((s) => s.id === "review") as any;
+  assert.deepEqual(extractVars("Score 8/10.", got.extract), { score: 8 });
 });
 
 test("implement → review loop → approval → merge", async () => {
@@ -127,6 +145,18 @@ test("formatHandoffs drops oldest notes when too long", async () => {
   assert.doesNotMatch(out, /S1"/);
   assert.match(out, /S3"/);
   assert.match(out, /older note\(s\) left out/);
+});
+
+test("score missing from the final answer is read from the handoff note", async () => {
+  const { repo, cfg } = makeRepo();
+  cfg.harnesses.sh = { command: "bash", args: ["-c", 'echo "Score 9/10." > "$LOOPSMITH_HANDOFF_FILE"; echo "Review complete."'] };
+  cfg.pipeline = [{ id: "review", type: "agent", harness: "sh", prompt: "x", extract: { score: (defaultConfig().pipeline.find((s) => s.id === "review") as any).extract.score }, next: [{ when: "score >= 8", goto: "end" }] }];
+  const engine = new Engine(repo, () => cfg, new DemoHost());
+  const [run] = engine.enqueue([{ number: 1, title: "t" }], { autoApprove: true });
+  await waitFor(() => run.status !== "running" && run.status !== "queued");
+  assert.equal(run.error, undefined);
+  assert.equal(run.status as string, "done");
+  assert.equal(run.vars.score, 9);
 });
 
 test("review with no score: retried, then the run fails (never passes on an old score)", async () => {

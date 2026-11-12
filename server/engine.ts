@@ -647,7 +647,8 @@ export class Engine extends EventEmitter {
       }
 
       if (s.extract && res.code === 0) {
-        step.vars = extractVars(output, s.extract);
+        // The final answer wins. The handoff note fills gaps: pi -p prints only the last message, which can lack the score.
+        step.vars = { ...extractVars(step.handoff ?? "", s.extract), ...extractVars(output, s.extract) };
         Object.assign(run.vars, step.vars);
         const missing = Object.keys(s.extract).filter((k) => step.vars![k] === undefined);
         if (missing.length) {

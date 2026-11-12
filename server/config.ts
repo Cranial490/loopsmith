@@ -110,6 +110,10 @@ Rules:
 - Write the assumptions you made in the PR description under "Assumptions".
 - At the end, output a short summary of what you implemented in simple language.`;
 
+// Lenient: agents write "SCORE: 8/10", "Score 8/10." or "**Score:** 8/10".
+const SCORE_RE = "SCORE[^\\w\\n]{0,10}(\\d+(?:\\.\\d+)?)\\s*/\\s*10";
+const OLD_SCORE_RE = "SCORE:\\s*(\\d+(?:\\.\\d+)?)\\s*/\\s*10";
+
 const REVIEW_PROMPT = `Review PR #{{pr.number}} (branch "{{branch}}", issue #{{issue.number}}). Look for inconsistencies, bugs and any major architecture blunders.
 This is review round {{iteration}}.
 
@@ -201,7 +205,7 @@ export function defaultConfig(): Config {
         type: "agent",
         harness: "codex",
         prompt: REVIEW_PROMPT,
-        extract: { score: "SCORE:\\s*(\\d+(?:\\.\\d+)?)\\s*/\\s*10" },
+        extract: { score: SCORE_RE },
         next: [
           { when: "score >= 8", goto: "approve" },
           { goto: "fix" },
@@ -241,6 +245,11 @@ export function loadConfig(repo: string): Config {
       && JSON.stringify(h.resumeArgs) === JSON.stringify(["exec", ...OLD_CODEX_FLAGS, "resume", "{{sessionId}}", "{{prompt}}"])) {
       Object.assign(h, { args: d.args, resumeArgs: d.resumeArgs, continueArgs: d.continueArgs, sessionIdPattern: d.sessionIdPattern, format: d.format });
     }
+  }
+  // The old default score regex needed exactly "SCORE:"; upgrade it where it was never changed.
+  for (const st of cfg.pipeline ?? []) {
+    const ex = (st as AgentStage).extract;
+    if (ex) for (const k of Object.keys(ex)) if (ex[k] === OLD_SCORE_RE) ex[k] = SCORE_RE;
   }
   const errors = validateConfig(cfg);
   if (errors.length) throw new Error(`Invalid ${p}:\n- ${errors.join("\n- ")}`);
