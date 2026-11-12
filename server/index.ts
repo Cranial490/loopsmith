@@ -6,6 +6,7 @@ import { loadConfig, saveConfig, validateConfig, defaultConfig, type Config } fr
 import { Engine } from "./engine.js";
 import { GhCli, type GitHost } from "./github.js";
 import { setupDemoRepo, DemoHost } from "./demo.js";
+import { listModels } from "./models.js";
 
 const argv = process.argv.slice(2);
 const flag = (name: string) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
@@ -62,6 +63,7 @@ app.put("/api/config", wrap((req) => {
   broadcast("config", config);
   return config;
 }));
+app.get("/api/models", wrap(() => listModels(config.harnesses)));
 app.get("/api/config/default", wrap(() => defaultConfig()));
 
 // Server-sent events: live run updates and log lines.

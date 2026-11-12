@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import { defaultConfig, loadConfig, validateConfig } from "../server/config.ts";
 import { Engine, withModel, type Run } from "../server/engine.ts";
 import { DemoHost } from "../server/demo.ts";
+import { parseCodexModels } from "../server/models.ts";
 import { evalCondition, extractVars, render } from "../server/template.ts";
 
 const fake = path.resolve("demo/fake-agent.mjs");
@@ -44,6 +45,10 @@ test("model args go before the prompt, or at the end", () => {
   assert.deepEqual(withModel(["exec", "--json", "resume", "{{sessionId}}", "{{prompt}}"], m), ["exec", "--json", "resume", "{{sessionId}}", "--model", "{{model}}", "{{prompt}}"]);
   assert.deepEqual(withModel(["run", "--prompt={{prompt}}"], m), ["run", "--prompt={{prompt}}", "--model", "{{model}}"]);
   assert.deepEqual(withModel(["-p", "{{prompt}}"], []), ["-p", "{{prompt}}"]);
+});
+
+test("codex model list: every slug from `codex debug models`", () => {
+  assert.deepEqual(parseCodexModels(JSON.stringify({ models: [{ slug: "gpt-6-astra", visibility: "list" }, { slug: "gpt-reserve", visibility: "hide" }] })), ["gpt-6-astra", "gpt-reserve"]);
 });
 
 test("default score regex reads the ways agents write a score", () => {
