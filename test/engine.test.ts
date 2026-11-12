@@ -378,6 +378,16 @@ test("spec tickets: sub-issues JSON and parent lines are parsed and merged", asy
     { number: 24, title: "other spec", body: "Part of #99" },
   ];
   assert.deepEqual(ticketsOf(20, all, [22, 21, 20]).map((i) => i.number), [21, 22, 23]);
+
+  // The gh loader's REST shapes. Sub-issue #2 is not in the issue list (e.g. an old issue): it comes from the sub-issues response.
+  // Text-parent #3 sits far down a long list. Pull-request-free list, other repos' sub-issues skipped.
+  const { ticketsFromRest } = await import("../server/github.ts");
+  const rest = (number: number, extra = {}) => ({ number, title: `t${number}`, state: "open", html_url: `https://github.com/o/r/issues/${number}`, labels: [{ name: "x" }], ...extra });
+  const many = Array.from({ length: 700 }, (_, k) => rest(1000 - k));
+  const got = ticketsFromRest(20, [rest(2, { state: "closed" }), rest(21), { ...rest(9), html_url: "https://github.com/other/repo/issues/9" }], [rest(20), rest(21), ...many, rest(3, { body: "Part of #20" })]);
+  assert.deepEqual(got.map((i) => [i.number, i.title, i.state, i.url]), [
+    [2, "t2", "closed", "https://github.com/o/r/issues/2"], [3, "t3", "open", "https://github.com/o/r/issues/3"], [21, "t21", "open", "https://github.com/o/r/issues/21"],
+  ]);
 });
 
 test("spec graph: membership, edges, depth and status", async () => {

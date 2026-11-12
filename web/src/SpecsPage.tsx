@@ -3,7 +3,7 @@ import { api, NODE_LABEL, type Config, type Issue, type Run, type SpecGraph } fr
 import { Markdown } from "./Markdown";
 import { RunDetail } from "./RunDetail";
 
-const W = 220, H = 62, GAP_X = 72, GAP_Y = 16;
+const W = 220, H = 62, GAP_X = 72, GAP_Y = 16, LANE = 10;
 
 /** Tickets in columns by depth, with an arrow from each blocker to the ticket it blocks. */
 function Graph({ graph, onOpenRun }: { graph: SpecGraph; onOpenRun: (id: string) => void }) {
@@ -15,7 +15,10 @@ function Graph({ graph, onOpenRun }: { graph: SpecGraph; onOpenRun: (id: string)
     pos.set(n.number, { x: n.depth * (W + GAP_X), y: row * (H + GAP_Y) });
   }
   const width = rows.size * (W + GAP_X) - GAP_X;
-  const height = Math.max(...rows.values()) * (H + GAP_Y) - GAP_Y;
+  const nodesHeight = Math.max(...rows.values()) * (H + GAP_Y) - GAP_Y;
+  // An arrow that skips a column runs in its own lane below the nodes, so it never passes behind one.
+  const long = graph.edges.filter((e) => pos.get(e.to)!.x - pos.get(e.from)!.x > W + GAP_X);
+  const height = nodesHeight + (long.length ? GAP_Y + long.length * LANE : 0);
   return (
     <div className="graph-scroll">
       <div className="graph" style={{ width, height }}>
@@ -23,8 +26,12 @@ function Graph({ graph, onOpenRun }: { graph: SpecGraph; onOpenRun: (id: string)
           <defs><marker id="arrowhead" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 8 4 0 8z" /></marker></defs>
           {graph.edges.map((e) => {
             const a = pos.get(e.from)!, b = pos.get(e.to)!;
-            const x1 = a.x + W, y1 = a.y + H / 2, x2 = b.x, y2 = b.y + H / 2, bend = Math.max(GAP_X / 2, (x2 - x1) / 2);
-            return <path key={`${e.from}-${e.to}`} d={`M${x1} ${y1} C${x1 + bend} ${y1} ${x2 - bend} ${y2} ${x2} ${y2}`} markerEnd="url(#arrowhead)" />;
+            const x1 = a.x + W, y1 = a.y + H / 2, x2 = b.x, y2 = b.y + H / 2;
+            const lane = long.indexOf(e);
+            const d = lane < 0
+              ? `M${x1} ${y1} C${x1 + GAP_X / 2} ${y1} ${x2 - GAP_X / 2} ${y2} ${x2} ${y2}`
+              : `M${x1} ${y1} H${x1 + GAP_X / 2 - lane * 4} V${nodesHeight + GAP_Y + lane * LANE} H${x2 - GAP_X / 2 + lane * 4} V${y2} H${x2}`;
+            return <path key={`${e.from}-${e.to}`} d={d} markerEnd="url(#arrowhead)" />;
           })}
         </svg>
         {graph.nodes.map((n) => (

@@ -28,13 +28,14 @@ export class GhCli implements GitHost {
   }
 
   async listTickets(spec: number): Promise<Issue[]> {
-    // ponytail: reads the newest 500 issues to find text parent lines. Use a search query if a repo outgrows this.
+    // Every issue in the repo (pull requests left out), so old text-parent tickets are found too.
+    // ponytail: pages through all issues on each call. Use a search query if a repo gets very big.
+    const ndjson = (jq: string, path: string) => exec("gh", ["api", "--paginate", path, "--jq", jq], this.repo);
     const [subs, all] = await Promise.all([
-      exec("gh", ["api", `repos/{owner}/{repo}/issues/${spec}/sub_issues?per_page=100`], this.repo),
-      exec("gh", ["issue", "list", "--state", "all", "--limit", "500", "--json", "number,title,body,url,labels,state"], this.repo),
+      ndjson(".[]", `repos/{owner}/{repo}/issues/${spec}/sub_issues?per_page=100`),
+      ndjson(".[] | select(.pull_request | not)", "repos/{owner}/{repo}/issues?state=all&per_page=100"),
     ]);
-    const issues: Issue[] = JSON.parse(all).map(fromGh);
-    return this.withBlockers(ticketsOf(spec, issues, parseSubIssues(JSON.parse(subs), issues.find((i) => i.number === spec) ?? { number: spec })));
+    return this.withBlockers(ticketsFromRest(spec, parseLines(subs), parseLines(all)));
   }
 
   private async withBlockers(issues: Issue[]): Promise<Issue[]> {
@@ -62,6 +63,25 @@ export const SPEC_LABEL = "spec";
 
 /** An issue as `gh issue list --json ...` prints it. */
 const fromGh = (i: any): Issue => ({ number: i.number, title: i.title, body: i.body, url: i.url, labels: i.labels?.map((l: any) => l.name) ?? [], ...(i.state ? { state: i.state.toLowerCase() } : {}) });
+
+/** An issue as the REST API returns it. */
+const fromRest = (i: any): Issue => fromGh({ ...i, url: i.html_url });
+
+/** One JSON value per line, as `gh api --jq` prints them. */
+const parseLines = (out: string) => out.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
+
+/**
+ * The tickets of a spec from REST issue objects: its sub-issues plus all issues with a parent line for it.
+ * A sub-issue missing from `all` is still used, from the sub-issues response itself.
+ */
+export function ticketsFromRest(spec: number, subIssues: any[], all: any[]): Issue[] {
+  const issues = all.map(fromRest);
+  const known = new Set(issues.map((i) => i.number));
+  const specUrl = issues.find((i) => i.number === spec)?.url;
+  const subs = parseSubIssues(subIssues, { number: spec, url: specUrl });
+  const own = subIssues.filter((d) => subs.includes(d?.number) && !known.has(d.number)).map(fromRest);
+  return ticketsOf(spec, [...issues, ...own], subs);
+}
 
 /**
  * Issue numbers after a "Blocked by" line or heading (the format /to-issues writes).
