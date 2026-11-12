@@ -26,6 +26,7 @@ export const api = {
   log: (id: string, index: number) => call<Chunk[]>("GET", `/api/runs/${id}/steps/${index}/log`),
   saveConfig: (cfg: Config) => call<Config>("PUT", "/api/config", cfg),
   defaultConfig: () => call<Config>("GET", "/api/config/default"),
+  models: () => call<Record<string, string[]>>("GET", "/api/models"),
 };
 
 /** A live log chunk. `n` is its position in the saved log, so gaps and repeats can be spotted. */

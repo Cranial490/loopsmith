@@ -9,7 +9,10 @@ export function PipelineEditor({ config, onSaved }: { config: Config; onSaved: (
   const [sel, setSel] = useState<string>(config.pipeline[0]?.id);
   const [raw, setRaw] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [models, setModels] = useState<Record<string, string[]>>({});
   const dirty = JSON.stringify(draft) !== JSON.stringify(config);
+
+  useEffect(() => { api.models().then(setModels, () => {}); }, []);
 
   useEffect(() => { if (!dirty) setDraft(structuredClone(config)); }, [config]);
 
@@ -113,7 +116,7 @@ export function PipelineEditor({ config, onSaved }: { config: Config; onSaved: (
 
           <div className="editor">
             {stage ? (
-              <StageForm key={stage.id} stage={stage} ids={ids} harnesses={draft.harnesses}
+              <StageForm key={stage.id} stage={stage} ids={ids} harnesses={draft.harnesses} models={stage.type === "agent" ? models[stage.harness] ?? [] : []}
                 onChange={(p) => setStage(stage.id, p)} onRename={(n) => rename(stage.id, n)}
                 onMove={(d) => move(stage.id, d)} onDelete={() => del(stage.id)} />
             ) : <div className="muted">Select a stage.</div>}
@@ -148,11 +151,8 @@ export function PipelineEditor({ config, onSaved }: { config: Config; onSaved: (
   );
 }
 
-// ponytail: hand-kept suggestions (the CLIs have no command that lists models); any name can be typed.
-const MODEL_HINTS: Record<string, string[]> = { claude: ["fable", "opus", "sonnet", "haiku"], codex: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] };
-
-function StageForm({ stage, ids, harnesses, onChange, onRename, onMove, onDelete }: {
-  stage: Stage; ids: string[]; harnesses: Record<string, HarnessConfig>;
+function StageForm({ stage, ids, harnesses, models, onChange, onRename, onMove, onDelete }: {
+  stage: Stage; ids: string[]; harnesses: Record<string, HarnessConfig>; models: string[];
   onChange: (p: Partial<Stage>) => void; onRename: (id: string) => void; onMove: (d: -1 | 1) => void; onDelete: () => void;
 }) {
   const [idDraft, setIdDraft] = useState(stage.id);
@@ -190,7 +190,7 @@ function StageForm({ stage, ids, harnesses, onChange, onRename, onMove, onDelete
             <label>Model (empty = the CLI's default)
               <input value={stage.model ?? ""} list={`models-${stage.harness}`} placeholder="default" spellCheck={false}
                 onChange={(e) => onChange({ model: e.target.value.trim() || undefined } as any)} />
-              <datalist id={`models-${stage.harness}`}>{(MODEL_HINTS[stage.harness] ?? []).map((m) => <option key={m} value={m} />)}</datalist>
+              <datalist id={`models-${stage.harness}`}>{models.map((m) => <option key={m} value={m} />)}</datalist>
             </label>
             <label className="check inline"><input type="checkbox" checked={!!stage.continueSession} onChange={(e) => onChange({ continueSession: e.target.checked } as any)} /> Continue an earlier session of this harness</label>
             <label>Continue only from these stages (ids, comma separated; empty = any)<input value={(stage.continueFrom ?? []).join(", ")} disabled={!stage.continueSession} onChange={(e) => onChange({ continueFrom: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) } as any)} /></label>
