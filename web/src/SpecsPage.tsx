@@ -75,7 +75,7 @@ export function SpecsPage({ spec, refreshKey, config, onOpenRun, onCloseRun, run
     setImplementing(true);
     try {
       const made = await api.implementSpec(n);
-      setNote({ spec: n, text: made.length ? `Queued ${made.map((r) => `#${r.issue.number}`).join(", ")} hands-off. Follow them here or in the Runs view.` : "Nothing new to queue. Resume failed or stopped runs from the run itself." });
+      setNote({ spec: n, text: made.length ? `Queued ${made.map((r) => `#${r.issue.number}`).join(", ")} hands-off. Follow them here or in the Runs view.` : "Nothing new to queue. Resume failed runs from the run itself." });
     } catch (e: any) { setNote({ spec: n, text: e.message, bad: true }); }
     setImplementing(false);
     setReload((k) => k + 1); // the engine read GitHub again, so show what it saw
@@ -101,7 +101,7 @@ export function SpecsPage({ spec, refreshKey, config, onOpenRun, onCloseRun, run
   }, [spec, refreshKey, reload]);
   const shown = graph?.number === spec ? graph : null;
   const err = graphErr && graphErr.spec === spec ? graphErr.message : "";
-  const todo = shown?.nodes.filter((n) => n.status === "not_started").length ?? 0; // open tickets with no run
+  const todo = shown?.todo.length ?? 0; // open tickets with no run, or only a stopped one
 
   return (
     <main className="runs-layout">
@@ -136,7 +136,7 @@ export function SpecsPage({ spec, refreshKey, config, onOpenRun, onCloseRun, run
               </div>
               {shown.problem && <div className="error">{shown.problem}</div>}
               {!shown.problem && note?.spec === shown.number && <div className={note.bad ? "error" : "muted small-note"}>{note.text}</div>}
-              {!shown.problem && todo === 0 && shown.nodes.length > 0 && note?.spec !== shown.number && <div className="muted small-note">Every open ticket already has a run. Resume failed or stopped runs from the run itself.</div>}
+              {!shown.problem && todo === 0 && shown.nodes.length > 0 && note?.spec !== shown.number && <div className="muted small-note">Every open ticket already has a live, done or failed run. Resume failed runs from the run itself.</div>}
               {shown.nodes.length ? <Graph graph={shown} onOpenRun={onOpenRun} /> : <div className="muted">This spec has no tickets yet. Add sub-issues, or a <code>Part of #{shown.number}</code> line to an issue.</div>}
               {shown.nodes.length > 0 && <p className="muted small-note">Arrows go from a blocker to the ticket it blocks. Click a ticket that has a run to open it.</p>}
               <div className="spec-body">{shown.body.trim() ? <Markdown text={shown.body} /> : <span className="muted">This spec has no description.</span>}</div>

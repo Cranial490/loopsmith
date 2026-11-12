@@ -549,23 +549,26 @@ test("implement a spec hands-off: blocker order, the fork in parallel, safe to p
     const all = [...engine.runs.values()];
     const running = all.filter((r) => r.status === "running");
     together.add(running.map((r) => r.issue.number).sort().join());
-    for (const r of running) for (const b of r.blockedBy) if (all.some((x) => x.issue.number === b && x.status !== "done")) tooEarly.push(`#${r.issue.number} before #${b}`);
+    const latest = (n: number) => all.filter((x) => x.issue.number === n).sort((a, b) => b.seq - a.seq)[0];
+    for (const r of running) for (const b of r.blockedBy) if (latest(b) && latest(b).status !== "done") tooEarly.push(`#${r.issue.number} before #${b}`);
   });
 
   // Only the open tickets, in blocker order, all hands-off. Never the spec or the closed ticket.
   const runs = await engine.implementSpec(10);
   assert.deepEqual(runs.map((r) => r.issue.number), [11, 12, 13, 14]);
   assert.ok(runs.every((r) => r.options.autoApprove));
-  const [r11, r12, r13, r14] = runs;
+  const [first, r12, r13, r14] = runs;
 
-  // The runs are normal runs: stop one, and it waits for you. Implement again does not touch it.
-  await waitFor(() => r11.status === "running");
-  engine.stop(r11.id);
-  await waitFor(() => r11.status === "stopped");
-  assert.deepEqual(await engine.implementSpec(10), []);
+  // The runs are normal runs: stop one, and the tickets after it wait. A stopped run is not live, so Implement queues it again.
+  await waitFor(() => first.status === "running");
+  engine.stop(first.id);
+  await waitFor(() => first.status === "stopped");
   await new Promise((r) => setTimeout(r, 300));
   assert.deepEqual([r12.status, r13.status, r14.status], ["queued", "queued", "queued"]);
-  engine.resume(r11.id);
+  assert.deepEqual((await engine.specGraph(10)).todo, [11]);
+  const again = await engine.implementSpec(10);
+  assert.deepEqual(again.map((r) => [r.issue.number, r.options.autoApprove]), [[11, true]]);
+  const r11 = again[0];
 
   await waitFor(() => r14.status === "failed");
   assert.deepEqual([r11.status, r12.status, r13.status], ["done", "done", "done"]);
@@ -575,8 +578,10 @@ test("implement a spec hands-off: blocker order, the fork in parallel, safe to p
   assert.equal(r11.steps.find((s) => s.stageId === "a")!.status, "skipped"); // the approval passed on its own
 
   // Pressing again queues nothing new and leaves the failed run for you to resume.
+  assert.deepEqual((await engine.specGraph(10)).todo, []);
   assert.deepEqual(await engine.implementSpec(10), []);
-  assert.equal(engine.runs.size, 4);
+  assert.equal(engine.runs.size, 5);
+  assert.equal(first.status, "stopped");
   assert.equal(r14.status, "failed");
   fs.writeFileSync(path.join(repo, "ok"), "");
   engine.resume(r14.id);
@@ -618,4 +623,34 @@ test("max parallel: 2 in a new config, a saved config keeps its value", () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "ls-cfg-"));
   fs.writeFileSync(path.join(repo, "loopsmith.config.json"), JSON.stringify({ ...defaultConfig(), maxParallel: 1 }));
   assert.equal(loadConfig(repo).maxParallel, 1);
+});
+
+test("implement a spec: a closed blocker counts as done, even with an old stopped or failed run", async () => {
+  const host = new DemoHost();
+  const { repo, cfg } = makeRepo();
+  cfg.pipeline = [{ id: "s", type: "shell", command: "test {{issue.number}} != 1" }];
+  cfg.maxParallel = 4; // the old failed and waiting runs keep their slots
+  const engine = new Engine(repo, () => cfg, host);
+  // Old runs: #1 failed, #2 stopped. Then both issues are closed (e.g. done by hand).
+  const [old1] = engine.enqueue([{ number: 1, title: "a" }], { autoApprove: true });
+  await waitFor(() => old1.status === "failed");
+  cfg.pipeline = [{ id: "a", type: "approval" }];
+  const [old2] = engine.enqueue([{ number: 2, title: "b" }], { autoApprove: false });
+  await waitFor(() => old2.status === "waiting_approval");
+  engine.stop(old2.id);
+  for (const n of [1, 2]) host.issues.find((i) => i.number === n)!.state = "closed";
+  host.dependencies[11] = [{ number: 1 }];
+  host.dependencies[13] = [{ number: 11 }, { number: 2 }];
+  // A closed ticket of the spec counts as done too.
+  host.issues.push({ number: 15, title: "old ticket", body: "Part of #10", state: "closed" });
+  host.dependencies[12] = [{ number: 15 }];
+  engine.enqueue([{ number: 15, title: "c" }], { autoApprove: false });
+
+  cfg.pipeline = [{ id: "s", type: "shell", command: "true" }];
+  const runs = await engine.implementSpec(10);
+  assert.deepEqual(runs.map((r) => r.issue.number), [11, 12, 13, 14]);
+  assert.deepEqual(runs.map((r) => [...r.blockedBy].sort()), [[], [11], [11], [12, 13]]);
+  await waitFor(() => runs.every((r) => r.status === "done"));
+  assert.deepEqual([old1.status, old2.status], ["failed", "stopped"]);
+  engine.shutdown();
 });

@@ -100,6 +100,8 @@ export interface SpecGraph {
   outside: { number: number; title: string; url?: string; blocks: number[] }[];
   /** Open tickets whose blocking links form a loop, each blocking the next and the last blocking the first. Empty = no loop. */
   loop: number[];
+  /** Open tickets that Implement would queue: no run yet, or only a stopped one. */
+  todo: number[];
   /** Why the spec cannot be implemented. Not set = it can. */
   problem?: string;
 }
@@ -333,7 +335,7 @@ export class Engine extends EventEmitter {
   private specCache = new Map<number, { data: Promise<[Issue, Issue[], Issue[]]>; loading: boolean }>();
 
   /**
-   * The spec, its tickets, and the open blockers outside the spec, from GitHub, kept until `refresh`. Run status is not part of it, so run updates
+   * The spec, its tickets, and the blockers outside the spec, from GitHub, kept until `refresh`. Run status is not part of it, so run updates
    * never read GitHub. A refresh while a load is running shares that load. A failed load is not kept.
    */
   private specIssues(n: number, refresh: boolean): Promise<[Issue, Issue[], Issue[]]> {
@@ -345,7 +347,7 @@ export class Engine extends EventEmitter {
       const nums = [...new Set(tickets.filter(isOpen).flatMap((t) => (t.blockedBy ?? []).filter((b) => !inSpec.has(b))))];
       // A blocker that cannot be read counts as open: refusing is the safe side.
       const blockers = await Promise.all(nums.map((b) => this.host.getIssue(b).catch(() => undefined).then((i): Issue => i ?? { number: b, title: "(could not read this issue)" })));
-      return [spec, tickets, blockers.filter(isOpen)];
+      return [spec, tickets, blockers];
     }).catch((e) => {
       if (this.specCache.get(n) === entry) this.specCache.delete(n);
       throw new Error(`Could not load the tickets of spec #${n} from GitHub: ${e?.message ?? e}`);
@@ -364,25 +366,34 @@ export class Engine extends EventEmitter {
     });
     const edges = tickets.flatMap((t) => (t.blockedBy ?? []).filter((b) => depths.has(b)).map((b) => ({ from: b, to: t.number })));
     const open = tickets.filter(isOpen);
-    const outside = blockers.map((b) => ({ number: b.number, title: b.title, url: b.url, blocks: open.filter((t) => t.blockedBy?.includes(b.number)).map((t) => t.number) }));
+    const outside = blockers.filter(isOpen).map((b) => ({ number: b.number, title: b.title, url: b.url, blocks: open.filter((t) => t.blockedBy?.includes(b.number)).map((t) => t.number) }));
     const loop = findLoop(open);
     const tag = (nums: number[]) => nums.map((x) => `#${x}`);
     const problems = [
       ...outside.map((b) => `${tag(b.blocks).join(", ")} is blocked by #${b.number}, which is open and not a ticket of this spec. Close #${b.number} or remove the link.`),
       ...(loop.length ? [`the blocking links form a loop (${tag([...loop, loop[0]]).join(" → ")}). Remove one of these links.`] : []),
     ];
-    return { number: spec.number, title: spec.title, body: spec.body ?? "", nodes, edges, outside, loop, problem: problems.length ? `Cannot implement spec #${n}: ${problems.join(" Also: ")}` : undefined };
+    return { number: spec.number, title: spec.title, body: spec.body ?? "", nodes, edges, outside, loop, todo: open.filter((t) => this.canImplement(t.number)).map((t) => t.number), problem: problems.length ? `Cannot implement spec #${n}: ${problems.join(" Also: ")}` : undefined };
   }
 
   /**
-   * Queue every open ticket of spec `n` that has no run yet, hands-off. The scheduler then follows the blockers.
-   * Tickets with a run are left alone (resume a failed or stopped one yourself), so calling this again is safe.
+   * Queue the spec's `todo` tickets hands-off. The scheduler then follows the blockers.
+   * Live, done and failed runs are left alone (resume a failed one yourself), so calling this again is safe.
+   * Closed blockers are dropped from the new runs: a closed issue counts as done, even if an old run of it is not.
    */
   async implementSpec(n: number): Promise<Run[]> {
     const graph = await this.specGraph(n, true); // read GitHub again: never start from old links
     if (graph.problem) throw new Error(graph.problem);
-    const [, tickets] = await this.specIssues(n, false);
-    return this.enqueue(tickets.filter((t) => isOpen(t) && !this.latestRun(t.number)), { autoApprove: true });
+    const [, tickets, blockers] = await this.specIssues(n, false);
+    const closed = new Set([...tickets, ...blockers].filter((i) => !isOpen(i)).map((i) => i.number));
+    const todo = tickets.filter((t) => graph.todo.includes(t.number)).map((t) => ({ ...t, blockedBy: (t.blockedBy ?? []).filter((b) => !closed.has(b)) }));
+    return this.enqueue(todo, { autoApprove: true });
+  }
+
+  /** No run yet, or the newest one was stopped by you. */
+  private canImplement(issue: number) {
+    const run = this.latestRun(issue);
+    return !run || run.status === "stopped";
   }
 
   // ---------- scheduler ----------
