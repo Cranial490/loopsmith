@@ -73,7 +73,7 @@ export interface Run {
   steps: Step[];
   currentStageId?: string;
   pipeline: Stage[]; // snapshot, so config edits never break a running loop
-  /** Issues that must be done first (from "Blocked by" in the issue body). */
+  /** Issues that must be done first (native "blocked by" links plus "Blocked by" in the issue body). */
   blockedBy: number[];
   /** Index of the step whose question you just answered. The next step continues that session. */
   pendingAnswer?: number;

@@ -71,7 +71,7 @@ export function duration(a?: string, b?: string) {
 
 export const NEEDS_YOU = ["waiting_approval", "waiting_input", "needs_attention", "failed", "interrupted"];
 
-/** Blocker issues (from "Blocked by") that a queued run still waits for. */
+/** Blocker issues (native links or "Blocked by" text) that a queued run still waits for. */
 export function waitingFor(run: Run, runs: Run[]): number[] {
   return (run.blockedBy ?? []).filter((n) => {
     const latest = runs.filter((r) => r.issue.number === n).sort((a, b) => b.seq - a.seq)[0];

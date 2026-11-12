@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import { defaultConfig, loadConfig, validateConfig } from "../server/config.ts";
 import { Engine, withModel, type Run } from "../server/engine.ts";
 import { DemoHost } from "../server/demo.ts";
+import { parseBlockers } from "../server/github.ts";
 import { parseCodexModels } from "../server/models.ts";
 import { evalCondition, extractVars, render } from "../server/template.ts";
 
@@ -232,6 +233,49 @@ test("queue: blocked issues wait, a failed run holds the queue, shutdown stops a
   await waitFor(() => r4.status === "running" && !!r4.steps[0]?.command);
   engine.shutdown();
   assert.equal(r4.status, "interrupted");
+});
+
+test("native blocked-by links: parsed, merged with text blockers, and they hold the queue", async () => {
+  const { parseDependencies, withNativeBlockers } = await import("../server/github.ts");
+  // The shape `gh api repos/{owner}/{repo}/issues/N/dependencies/blocked_by` returns.
+  const deps = [
+    { number: 3, html_url: "https://github.com/o/r/issues/3", repository_url: "https://api.github.com/repos/o/r" },
+    { number: 9, html_url: "https://github.com/o/r/issues/9" },
+    { number: 3, html_url: "https://github.com/o/r/issues/3" }, // duplicate
+    { number: 5, html_url: "https://github.com/o/r/issues/5" }, // itself
+    { number: 7, html_url: "https://github.com/other/repo/issues/7" }, // another repo: its number means nothing here
+  ];
+  const self = { number: 5, title: "t", url: "https://github.com/o/r/issues/5" };
+  assert.deepEqual(parseDependencies(deps, self), [3, 9]);
+  assert.deepEqual(parseDependencies([], self), []);
+  assert.deepEqual(parseDependencies({ message: "Not Found" }, self), []);
+
+  const withText = { ...self, body: "## Blocked by\n\n- #4\n- #3\n- #5" };
+  assert.deepEqual((await withNativeBlockers(withText, async () => JSON.stringify(deps))).blockedBy, [3, 9, 4]);
+  // The dependencies call fails: the text blockers are still used and nothing throws.
+  assert.deepEqual((await withNativeBlockers(withText, async () => { throw new Error("gh api failed: HTTP 404"); })).blockedBy, [4, 3]);
+  assert.deepEqual((await withNativeBlockers(withText, async () => "not json")).blockedBy, [4, 3]);
+
+  // Demo mode has an issue whose only blocker is a native link.
+  const host = new DemoHost();
+  const issues = await host.listIssues();
+  const native = issues.find((i) => i.blockedBy?.length && !parseBlockers(i.body, i.number).length)!;
+  assert.ok(native, "the demo host has an issue blocked only by a native link");
+  const blocker = issues.find((i) => i.number === native.blockedBy![0])!;
+
+  const { repo, cfg } = makeRepo();
+  cfg.maxParallel = 2;
+  cfg.pipeline = [{ id: "a", type: "approval" }];
+  const engine = new Engine(repo, () => cfg, host);
+  const [r1, r2] = engine.enqueue([native, blocker], { autoApprove: false });
+  assert.deepEqual([r1.issue.number, r2.issue.number], [blocker.number, native.number]);
+  await waitFor(() => r1.status === "waiting_approval");
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(r2.status, "queued"); // a slot is free, but the native blocker's run is not done
+  assert.deepEqual(engine.waitingFor(r2), [blocker.number]);
+  engine.approve(r1.id);
+  await waitFor(() => r1.status === "done" && r2.status === "waiting_approval");
+  engine.shutdown();
 });
 
 test("shell stages quote unsafe values", async () => {
