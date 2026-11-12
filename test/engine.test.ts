@@ -128,6 +128,7 @@ test("failed stage can be resumed; restart marks running as interrupted", async 
 
 test("maxParallel=1: next issue waits until the previous one is approved", async () => {
   const { repo, cfg } = makeRepo();
+  cfg.maxParallel = 1;
   cfg.pipeline = [{ id: "a", type: "approval" }, { id: "s", type: "shell", command: "true" }];
   const engine = new Engine(repo, () => cfg, new DemoHost());
   const [r1, r2] = engine.enqueue([{ number: 1, title: "a" }, { number: 2, title: "b" }], { autoApprove: false });
@@ -525,5 +526,271 @@ test("spec graph: GitHub is read once, run status stays live, and one refresh ru
   fail = false;
   assert.equal((await engine.specGraph(10)).nodes.length, 4);
   assert.equal(calls, 3);
+  engine.shutdown();
+});
+
+test("implement a spec hands-off: blocker order, the fork in parallel, safe to press again", async () => {
+  const host = new DemoHost();
+  host.issues.push({ number: 15, title: "old ticket", body: "Part of #10", state: "closed" });
+  // A closed blocker outside the spec counts as satisfied.
+  host.issues.find((i) => i.number === 1)!.state = "closed";
+  host.dependencies[11] = [{ number: 1 }];
+  const { repo, cfg } = makeRepo();
+  assert.equal(cfg.maxParallel, 2, "the default config runs two at a time");
+  cfg.pipeline = [{ id: "a", type: "approval" }, { id: "s", type: "shell", command: `sleep 0.4; test {{issue.number}} != 14 || test -f ${repo}/ok` }];
+  const engine = new Engine(repo, () => cfg, host);
+  const g = await engine.specGraph(10);
+  assert.deepEqual([g.outside, g.loop, g.problem], [[], [], undefined]);
+
+  // Watch every run update: who runs together, and nobody runs before its blockers are done.
+  const together = new Set<string>();
+  const tooEarly: string[] = [];
+  engine.on("run", () => {
+    const all = [...engine.runs.values()];
+    const running = all.filter((r) => r.status === "running");
+    together.add(running.map((r) => r.issue.number).sort().join());
+    const latest = (n: number) => all.filter((x) => x.issue.number === n).sort((a, b) => b.seq - a.seq)[0];
+    for (const r of running) for (const b of r.blockedBy) if (latest(b) && latest(b).status !== "done") tooEarly.push(`#${r.issue.number} before #${b}`);
+  });
+
+  // Only the open tickets, in blocker order, all hands-off. Never the spec or the closed ticket.
+  const runs = await engine.implementSpec(10);
+  assert.deepEqual(runs.map((r) => r.issue.number), [11, 12, 13, 14]);
+  assert.ok(runs.every((r) => r.options.autoApprove));
+  const [first, r12, r13, r14] = runs;
+
+  // The runs are normal runs: stop one, and the tickets after it wait. A stopped run is not live, so Implement queues it again.
+  await waitFor(() => first.status === "running");
+  engine.stop(first.id);
+  await waitFor(() => first.status === "stopped");
+  await new Promise((r) => setTimeout(r, 300));
+  assert.deepEqual([r12.status, r13.status, r14.status], ["queued", "queued", "queued"]);
+  assert.deepEqual((await engine.specGraph(10)).todo, [11]);
+  const again = await engine.implementSpec(10);
+  assert.deepEqual(again.map((r) => [r.issue.number, r.options.autoApprove]), [[11, true]]);
+  const r11 = again[0];
+
+  await waitFor(() => r14.status === "failed");
+  assert.deepEqual([r11.status, r12.status, r13.status], ["done", "done", "done"]);
+  assert.ok(together.has("12,13"), `the fork runs at the same time (saw: ${[...together].join(" | ")})`);
+  assert.ok([...together].every((s) => s.split(",").length <= 2));
+  assert.deepEqual(tooEarly, []);
+  assert.equal(r11.steps.find((s) => s.stageId === "a")!.status, "skipped"); // the approval passed on its own
+
+  // Pressing again queues nothing new and leaves the failed run for you to resume.
+  assert.deepEqual((await engine.specGraph(10)).todo, []);
+  assert.deepEqual(await engine.implementSpec(10), []);
+  assert.equal(engine.runs.size, 5);
+  assert.equal(first.status, "stopped");
+  assert.equal(r14.status, "failed");
+  fs.writeFileSync(path.join(repo, "ok"), "");
+  engine.resume(r14.id);
+  await waitFor(() => r14.status === "done");
+  engine.shutdown();
+});
+
+test("implement a spec: refused for an open blocker outside the spec, and for a loop", async () => {
+  const host = new DemoHost();
+  const { repo, cfg } = makeRepo();
+  const engine = new Engine(repo, () => cfg, host);
+
+  // #1 is open and not a ticket of spec #10: a warning node, and no Implement.
+  host.dependencies[11] = [{ number: 1 }];
+  let g = await engine.specGraph(10, true);
+  assert.deepEqual(g.outside, [{ number: 1, title: "Add order model and storage", url: "https://github.com/demo/repo/issues/1", blocks: [11] }]);
+  assert.match(g.problem!, /#11 is blocked by #1, which is open and not a ticket of this spec/);
+  await assert.rejects(engine.implementSpec(10), /Cannot implement spec #10: #11 is blocked by #1/);
+
+  // Once it is closed, it no longer counts.
+  host.issues.find((i) => i.number === 1)!.state = "closed";
+  g = await engine.specGraph(10, true);
+  assert.deepEqual([g.outside, g.problem], [[], undefined]);
+
+  // #11 → #12 → #14 → #11 is a loop.
+  host.dependencies[11] = [{ number: 14 }];
+  g = await engine.specGraph(10, true);
+  assert.ok(g.loop.length >= 3 && g.loop.includes(11) && g.loop.includes(14));
+  for (let k = 0; k < g.loop.length; k++) assert.ok(g.edges.some((e) => e.from === g.loop[k] && e.to === g.loop[(k + 1) % g.loop.length]), "the loop follows the arrows");
+  assert.match(g.problem!, /the blocking links form a loop \(#\d+ → /);
+  await assert.rejects(engine.implementSpec(10), /Cannot implement spec #10: the blocking links form a loop/);
+
+  assert.equal(engine.runs.size, 0);
+  engine.shutdown();
+});
+
+test("max parallel: 2 in a new config, a saved config keeps its value", () => {
+  assert.equal(defaultConfig().maxParallel, 2);
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "ls-cfg-"));
+  fs.writeFileSync(path.join(repo, "loopsmith.config.json"), JSON.stringify({ ...defaultConfig(), maxParallel: 1 }));
+  assert.equal(loadConfig(repo).maxParallel, 1);
+});
+
+test("implement a spec: a closed blocker counts as done, even with an old stopped or failed run", async () => {
+  const host = new DemoHost();
+  const { repo, cfg } = makeRepo();
+  cfg.pipeline = [{ id: "s", type: "shell", command: "test {{issue.number}} != 1" }];
+  assert.equal(cfg.maxParallel, 2); // the old failed and waiting runs of closed issues must not hold the two slots
+  const engine = new Engine(repo, () => cfg, host);
+  // Old runs: #1 failed, #2 stopped. Then both issues are closed (e.g. done by hand).
+  const [old1] = engine.enqueue([{ number: 1, title: "a" }], { autoApprove: true });
+  await waitFor(() => old1.status === "failed");
+  cfg.pipeline = [{ id: "a", type: "approval" }];
+  const [old2] = engine.enqueue([{ number: 2, title: "b" }], { autoApprove: false });
+  await waitFor(() => old2.status === "waiting_approval");
+  engine.stop(old2.id);
+  for (const n of [1, 2]) host.issues.find((i) => i.number === n)!.state = "closed";
+  host.dependencies[11] = [{ number: 1 }];
+  host.dependencies[13] = [{ number: 11 }, { number: 2 }];
+  // A closed ticket of the spec counts as done too.
+  host.issues.push({ number: 15, title: "old ticket", body: "Part of #10", state: "closed" });
+  host.dependencies[12] = [{ number: 15 }];
+  engine.enqueue([{ number: 15, title: "c" }], { autoApprove: false });
+
+  cfg.pipeline = [{ id: "s", type: "shell", command: "true" }];
+  const runs = await engine.implementSpec(10);
+  assert.deepEqual(runs.map((r) => r.issue.number), [11, 12, 13, 14]);
+  await waitFor(() => runs.every((r) => r.status === "done"));
+  assert.deepEqual([old1.status, old2.status], ["failed", "stopped"]);
+  engine.shutdown();
+});
+
+test("implement a spec: pressing again releases tickets whose blocker was closed meanwhile", async () => {
+  const host = new DemoHost();
+  const { repo, cfg } = makeRepo();
+  cfg.pipeline = [{ id: "s", type: "shell", command: "test {{issue.number}} != 11" }];
+  const engine = new Engine(repo, () => cfg, host);
+  const [r11, r12, r13, r14] = await engine.implementSpec(10);
+  await waitFor(() => r11.status === "failed");
+  await new Promise((r) => setTimeout(r, 300));
+  assert.deepEqual([r12.status, r13.status, r14.status], ["queued", "queued", "queued"]);
+
+  // #11 is done by hand and closed. Implement again queues nothing new, but the tickets behind #11 go on.
+  host.issues.find((i) => i.number === 11)!.state = "closed";
+  assert.deepEqual(await engine.implementSpec(10), []);
+  await waitFor(() => [r12, r13, r14].every((r) => r.status === "done"));
+  assert.equal(r11.status, "failed"); // its history is kept
+  engine.shutdown();
+});
+
+test("implement a spec: closed issues are remembered after a restart, without reading GitHub", async () => {
+  const host = new DemoHost();
+  const { repo, cfg } = makeRepo();
+  cfg.maxParallel = 1;
+  cfg.pipeline = [{ id: "s", type: "shell", command: "test {{issue.number}} != 11" }];
+  let engine = new Engine(repo, () => cfg, host);
+  const [old] = engine.enqueue([{ number: 11, title: "a" }], { autoApprove: true });
+  await waitFor(() => old.status === "failed");
+  host.issues.find((i) => i.number === 11)!.state = "closed";
+  const runs = await engine.implementSpec(10); // closed state is taken on when Implement accepts the graph
+  await waitFor(() => runs.every((r) => r.status === "done"));
+  engine.shutdown();
+
+  const offline = new DemoHost();
+  offline.listTickets = async () => { throw new Error("offline"); };
+  engine = new Engine(repo, () => cfg, offline);
+  const [r12] = engine.enqueue([{ number: 12, title: "b", blockedBy: [11] }], { autoApprove: true });
+  assert.deepEqual(engine.waitingFor(r12), []);
+  await waitFor(() => r12.status === "done"); // the old failed run of closed #11 holds no slot either
+  engine.shutdown();
+});
+
+test("implement a spec: pressing again gives queued tickets the current blocking links", async () => {
+  const host = new DemoHost();
+  const { repo, cfg } = makeRepo();
+  cfg.pipeline = [{ id: "s", type: "shell", command: "test {{issue.number}} != 11" }];
+  const engine = new Engine(repo, () => cfg, host);
+  const [r11, r12, r13] = await engine.implementSpec(10);
+  await waitFor(() => r11.status === "failed");
+  assert.deepEqual(engine.waitingFor(r12), [11]);
+
+  // #12 no longer waits for #11. #13 now also waits for #12.
+  host.issues.find((i) => i.number === 12)!.body = "Demo ticket.";
+  host.dependencies[13] = [{ number: 11 }, { number: 12 }];
+  assert.deepEqual(await engine.implementSpec(10), []);
+  assert.deepEqual([...r13.blockedBy].sort(), [11, 12]);
+  await waitFor(() => r12.status === "done");
+  assert.equal(r13.status, "queued");
+  engine.shutdown();
+});
+
+test("implement a spec: a refused Implement or a graph read releases nothing", async () => {
+  const host = new DemoHost();
+  const { repo, cfg } = makeRepo();
+  cfg.pipeline = [{ id: "s", type: "shell", command: "test {{issue.number}} != 11" }];
+  const engine = new Engine(repo, () => cfg, host);
+  const [r11, r12] = await engine.implementSpec(10);
+  await waitFor(() => r11.status === "failed");
+
+  // #11 is closed, but #12 gets an open outside blocker. Implement is refused, so #12 must not start.
+  host.issues.find((i) => i.number === 11)!.state = "closed";
+  host.dependencies[12] = [{ number: 1 }];
+  await assert.rejects(engine.implementSpec(10), /#12 is blocked by #1/);
+  await engine.specGraph(10, true);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(r12.status, "queued");
+  assert.deepEqual(engine.waitingFor(r12), [11]);
+
+  // Once #1 is closed too, Implement accepts the graph and #12 goes on.
+  host.issues.find((i) => i.number === 1)!.state = "closed";
+  assert.deepEqual(await engine.implementSpec(10), []);
+  await waitFor(() => r12.status === "done");
+  engine.shutdown();
+});
+
+test("implement a spec: Continue stops the queued run of a ticket closed on GitHub", async () => {
+  const host = new DemoHost();
+  const { repo, cfg } = makeRepo();
+  cfg.pipeline = [{ id: "s", type: "shell", command: "test {{issue.number}} != 11" }];
+  const engine = new Engine(repo, () => cfg, host);
+  const [r11, r12, r13, r14] = await engine.implementSpec(10);
+  await waitFor(() => r11.status === "failed");
+
+  // #11 and #12 are done by hand and closed. #12 must not run; the tickets after them go on.
+  for (const n of [11, 12]) host.issues.find((i) => i.number === n)!.state = "closed";
+  assert.deepEqual(await engine.implementSpec(10), []);
+  assert.equal(r12.status, "stopped");
+  assert.match(r12.error!, /closed on GitHub/);
+  await waitFor(() => r13.status === "done" && r14.status === "done");
+  assert.deepEqual([r11.status, r12.status, r12.steps.length], ["failed", "stopped", 0]);
+  engine.shutdown();
+});
+
+test("implement a spec: the links that start work are the links that were checked", async () => {
+  const host = new DemoHost();
+  const { repo, cfg } = makeRepo();
+  cfg.pipeline = [{ id: "a", type: "approval" }];
+  const engine = new Engine(repo, () => cfg, host);
+  // Right after Implement checks the graph, another request refreshes it, and GitHub now has an open outside blocker.
+  const can = (engine as any).canImplement.bind(engine);
+  let once = true;
+  (engine as any).canImplement = (n: number) => {
+    if (once) { once = false; host.dependencies[11] = [{ number: 1 }]; void engine.specGraph(10, true); }
+    return can(n);
+  };
+  const runs = await engine.implementSpec(10);
+  assert.deepEqual(runs.map((r) => r.issue.number), [11, 12, 13, 14]);
+  assert.deepEqual(runs[0].blockedBy, [], "#11 got the checked links, not the newer unchecked ones");
+  engine.shutdown();
+});
+
+test("implement a spec: Continue stops a queued run of a closed outside blocker", async () => {
+  const host = new DemoHost();
+  const { repo, cfg } = makeRepo();
+  cfg.pipeline = [{ id: "a", type: "approval" }];
+  const engine = new Engine(repo, () => cfg, host);
+  // #1 (outside the spec) is queued behind #2, which waits for approval.
+  const [r2, r1] = engine.enqueue([{ number: 2, title: "b" }, { number: 1, title: "a", blockedBy: [2] }], { autoApprove: false });
+  await waitFor(() => r2.status === "waiting_approval");
+  assert.equal(r1.status, "queued");
+
+  // #1 is done by hand and closed, and it blocks #11. Implement must not start #1.
+  host.issues.find((i) => i.number === 1)!.state = "closed";
+  host.dependencies[11] = [{ number: 1 }];
+  cfg.pipeline = [{ id: "s", type: "shell", command: "true" }];
+  const runs = await engine.implementSpec(10);
+  assert.equal(r1.status, "stopped");
+  assert.match(r1.error!, /#1 was closed on GitHub/);
+  await waitFor(() => runs.every((r) => r.status === "done"));
+  assert.deepEqual([r1.status, r1.steps.length], ["stopped", 0]);
   engine.shutdown();
 });

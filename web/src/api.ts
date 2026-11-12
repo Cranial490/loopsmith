@@ -13,10 +13,11 @@ async function call<T>(method: string, url: string, body?: unknown): Promise<T> 
 }
 
 export const api = {
-  state: () => call<{ repo: string; demo: boolean; config: Config; runs: Run[] }>("GET", "/api/state"),
+  state: () => call<{ repo: string; demo: boolean; config: Config; runs: Run[]; closed: number[] }>("GET", "/api/state"),
   issues: () => call<Issue[]>("GET", "/api/issues"),
   specs: () => call<Issue[]>("GET", "/api/specs"),
   spec: (n: number, refresh = false) => call<SpecGraph>("GET", `/api/specs/${n}${refresh ? "?refresh=1" : ""}`),
+  implementSpec: (n: number) => call<Run[]>("POST", `/api/specs/${n}/implement`),
   start: (issues: Issue[], autoApprove: boolean) => call<Run[]>("POST", "/api/runs", { issues, autoApprove }),
   approve: (id: string) => call("POST", `/api/runs/${id}/approve`),
   reject: (id: string) => call("POST", `/api/runs/${id}/reject`),
@@ -39,11 +40,12 @@ export const onLog = (fn: (e: LogEvent) => void) => { logListeners.add(fn); retu
 const reconnectListeners = new Set<() => void>();
 export const onReconnect = (fn: () => void) => { reconnectListeners.add(fn); return () => { reconnectListeners.delete(fn); }; };
 
-export function connectEvents(handlers: { run: (r: Run) => void; removed: (id: string) => void; config: (c: Config) => void; status: (ok: boolean) => void }) {
+export function connectEvents(handlers: { run: (r: Run) => void; removed: (id: string) => void; config: (c: Config) => void; closed: (n: number[]) => void; status: (ok: boolean) => void }) {
   const es = new EventSource("/api/events");
   es.addEventListener("run", (e) => handlers.run(JSON.parse((e as MessageEvent).data)));
   es.addEventListener("removed", (e) => handlers.removed(JSON.parse((e as MessageEvent).data).id));
   es.addEventListener("config", (e) => handlers.config(JSON.parse((e as MessageEvent).data)));
+  es.addEventListener("closed", (e) => handlers.closed(JSON.parse((e as MessageEvent).data)));
   es.addEventListener("log", (e) => { const d = JSON.parse((e as MessageEvent).data); logListeners.forEach((f) => f(d)); });
   let opened = false;
   es.onopen = () => { handlers.status(true); if (opened) reconnectListeners.forEach((f) => f()); opened = true; };
@@ -77,9 +79,10 @@ export function duration(a?: string, b?: string) {
 
 export const NEEDS_YOU = ["waiting_approval", "waiting_input", "needs_attention", "failed", "interrupted"];
 
-/** Blocker issues (native links or "Blocked by" text) that a queued run still waits for. */
-export function waitingFor(run: Run, runs: Run[]): number[] {
+/** Blocker issues (native links or "Blocked by" text) that a queued run still waits for. Same rule as the engine: a closed issue counts as done. */
+export function waitingFor(run: Run, runs: Run[], closed: number[]): number[] {
   return (run.blockedBy ?? []).filter((n) => {
+    if (closed.includes(n)) return false;
     const latest = runs.filter((r) => r.issue.number === n).sort((a, b) => b.seq - a.seq)[0];
     return latest && latest.status !== "done";
   });

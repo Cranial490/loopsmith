@@ -60,8 +60,9 @@ export class GhCli implements GitHost {
   }
 
   async getIssue(n: number): Promise<Issue> {
-    const out = await exec("gh", ["issue", "view", String(n), "--json", "number,title,body,url"], this.repo);
-    return withNativeBlockers(JSON.parse(out), this.dependencies);
+    const out = await exec("gh", ["issue", "view", String(n), "--json", "number,title,body,url,state"], this.repo);
+    const issue = JSON.parse(out);
+    return withNativeBlockers({ ...issue, state: issue.state?.toLowerCase() }, this.dependencies);
   }
 
   /** Raw JSON of an issue's native "blocked by" links. gh fills in {owner} and {repo}. */

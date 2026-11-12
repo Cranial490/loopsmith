@@ -11,6 +11,7 @@ export function App() {
   const [demo, setDemo] = useState(false);
   const [config, setConfig] = useState<Config | null>(null);
   const [runs, setRuns] = useState<Record<string, Run>>({});
+  const [closed, setClosed] = useState<number[]>([]); // issues the engine knows are closed
   const [tab, setTab] = useState<"runs" | "pipeline">("runs");
   const [selected, setSelected] = useState<string | null>(() => new URLSearchParams(location.search).get("run"));
   const [live, setLive] = useState(false);
@@ -37,7 +38,7 @@ export function App() {
       queue ??= [];
       api.state().then((s) => {
         if (my !== gen) return;
-        setRepo(s.repo); setDemo(s.demo); setConfig(s.config);
+        setRepo(s.repo); setDemo(s.demo); setConfig(s.config); setClosed(s.closed ?? []);
         setRuns((m) => Object.fromEntries(s.runs.map((r) => [r.id, newer(m[r.id], r)])));
         flush();
       }, () => { if (my === gen) flush(); });
@@ -49,6 +50,7 @@ export function App() {
       run: (r) => live(() => setRuns((m) => ({ ...m, [r.id]: newer(m[r.id], r) }))),
       removed: (id) => live(() => setRuns((m) => { const n = { ...m }; delete n[id]; return n; })),
       config: setConfig,
+      closed: (c) => live(() => setClosed(c)), // after a state response in flight, like run events
       status: (ok) => { setLive(ok); if (ok && opened) load(); if (ok) opened = true; },
     });
   }, []);
@@ -112,7 +114,7 @@ export function App() {
                 <p className="flow">{config.pipeline.map((s) => s.name ?? s.id).join("  →  ")}</p>
               </div>
             ) : (
-              <div className="cards">{list.map((r) => <RunCard key={r.id} run={r} waiting={r.status === "queued" ? waitingFor(r, list) : []} onOpen={() => setSelected(r.id)} />)}</div>
+              <div className="cards">{list.map((r) => <RunCard key={r.id} run={r} waiting={r.status === "queued" ? waitingFor(r, list, closed) : []} onOpen={() => setSelected(r.id)} />)}</div>
             )}
           </section>
         </main>

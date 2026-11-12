@@ -94,7 +94,17 @@ const PROBLEM: RunStatus[] = ["failed", "needs_attention", "interrupted"];
 export type NodeStatus = "not_started" | "queued" | "running" | "waiting" | "done" | "failed" | "needs_attention" | "closed";
 export interface SpecNode { number: number; title: string; url?: string; depth: number; status: NodeStatus; runId?: string }
 /** A spec and its tickets. An edge goes from a blocker to the ticket it blocks. */
-export interface SpecGraph { number: number; title: string; body: string; nodes: SpecNode[]; edges: { from: number; to: number }[] }
+export interface SpecGraph {
+  number: number; title: string; body: string; nodes: SpecNode[]; edges: { from: number; to: number }[];
+  /** Open issues outside the spec that block one of its open tickets. */
+  outside: { number: number; title: string; url?: string; blocks: number[] }[];
+  /** Open tickets whose blocking links form a loop, each blocking the next and the last blocking the first. Empty = no loop. */
+  loop: number[];
+  /** Open tickets that Implement would queue: no run yet, or only a stopped one. */
+  todo: number[];
+  /** Why the spec cannot be implemented. Not set = it can. */
+  problem?: string;
+}
 
 const NODE_STATUS: Record<RunStatus, NodeStatus> = {
   queued: "queued", running: "running", waiting_approval: "waiting", waiting_input: "waiting", done: "done", failed: "failed",
@@ -119,6 +129,7 @@ export class Engine extends EventEmitter {
 
   // ---------- persistence ----------
   private load() {
+    try { this.closed = new Set(JSON.parse(fs.readFileSync(this.closedFile(), "utf8"))); } catch {} // none yet, or half-written
     const dir = path.join(this.dataDir, "runs");
     for (const f of fs.readdirSync(dir)) {
       if (!f.endsWith(".json")) continue;
@@ -314,26 +325,39 @@ export class Engine extends EventEmitter {
     return [...this.runs.values()].filter((r) => r.issue.number === issue).sort((a, b) => b.seq - a.seq)[0];
   }
 
+  /**
+   * Issues GitHub said are closed, taken on when Implement accepts a spec's graph. A closed issue counts as done:
+   * it blocks nothing, and its old runs do not hold a slot. Their history is kept.
+   * Saved to `closed.json`, so a restart keeps it.
+   */
+  closed = new Set<number>();
+  private closedFile() { return path.join(this.dataDir, "closed.json"); }
+
   /** Issue numbers this queued run still waits for. */
   waitingFor(run: Run): number[] {
     return run.blockedBy.filter((n) => {
+      if (this.closed.has(n)) return false;
       const latest = this.latestRun(n);
       return latest && latest.status !== "done";
     });
   }
 
-  private specCache = new Map<number, { data: Promise<[Issue, Issue[]]>; loading: boolean }>();
+  private specCache = new Map<number, { data: Promise<[Issue, Issue[], Issue[]]>; loading: boolean }>();
 
   /**
-   * The spec and its tickets from GitHub, kept until `refresh`. Run status is not part of it, so run updates
+   * The spec, its tickets, and the blockers outside the spec, from GitHub, kept until `refresh`. Run status is not part of it, so run updates
    * never read GitHub. A refresh while a load is running shares that load. A failed load is not kept.
    */
-  private specIssues(n: number, refresh: boolean): Promise<[Issue, Issue[]]> {
+  private specIssues(n: number, refresh: boolean): Promise<[Issue, Issue[], Issue[]]> {
     const cached = this.specCache.get(n);
     if (cached && (!refresh || cached.loading)) return cached.data;
-    const entry = { loading: true, data: Promise.all([this.host.getIssue(n), this.host.listTickets(n)]).then(([spec, tickets]): [Issue, Issue[]] => {
+    const entry = { loading: true, data: Promise.all([this.host.getIssue(n), this.host.listTickets(n)]).then(async ([spec, tickets]): Promise<[Issue, Issue[], Issue[]]> => {
       if (!spec) throw new Error("no such issue");
-      return [spec, tickets];
+      const inSpec = new Set(tickets.map((t) => t.number));
+      const nums = [...new Set(tickets.filter(isOpen).flatMap((t) => (t.blockedBy ?? []).filter((b) => !inSpec.has(b))))];
+      // A blocker that cannot be read counts as open: refusing is the safe side.
+      const blockers = await Promise.all(nums.map((b) => this.host.getIssue(b).catch(() => undefined).then((i): Issue => i ?? { number: b, title: "(could not read this issue)" })));
+      return [spec, tickets, blockers];
     }).catch((e) => {
       if (this.specCache.get(n) === entry) this.specCache.delete(n);
       throw new Error(`Could not load the tickets of spec #${n} from GitHub: ${e?.message ?? e}`);
@@ -342,16 +366,71 @@ export class Engine extends EventEmitter {
     return entry.data;
   }
 
-  /** Spec `n` with its tickets as a graph. Blockers outside the spec give no edge. */
+  /** Spec `n` with its tickets as a graph. Blockers outside the spec give no edge; the open ones are in `outside`. */
   async specGraph(n: number, refresh = false): Promise<SpecGraph> {
-    const [spec, tickets] = await this.specIssues(n, refresh);
+    return this.buildGraph(n, await this.specIssues(n, refresh));
+  }
+
+  private buildGraph(n: number, [spec, tickets, blockers]: [Issue, Issue[], Issue[]]): SpecGraph {
     const depths = specDepths(tickets);
     const nodes = tickets.map((t): SpecNode => {
       const run = this.latestRun(t.number);
       return { number: t.number, title: t.title, url: t.url, depth: depths.get(t.number)!, status: run ? NODE_STATUS[run.status] : t.state === "closed" ? "closed" : "not_started", runId: run?.id };
     });
     const edges = tickets.flatMap((t) => (t.blockedBy ?? []).filter((b) => depths.has(b)).map((b) => ({ from: b, to: t.number })));
-    return { number: spec.number, title: spec.title, body: spec.body ?? "", nodes, edges };
+    const open = tickets.filter(isOpen);
+    const outside = blockers.filter(isOpen).map((b) => ({ number: b.number, title: b.title, url: b.url, blocks: open.filter((t) => t.blockedBy?.includes(b.number)).map((t) => t.number) }));
+    const loop = findLoop(open);
+    const tag = (nums: number[]) => nums.map((x) => `#${x}`);
+    const problems = [
+      ...outside.map((b) => `${tag(b.blocks).join(", ")} is blocked by #${b.number}, which is open and not a ticket of this spec. Close #${b.number} or remove the link.`),
+      ...(loop.length ? [`the blocking links form a loop (${tag([...loop, loop[0]]).join(" → ")}). Remove one of these links.`] : []),
+    ];
+    return { number: spec.number, title: spec.title, body: spec.body ?? "", nodes, edges, outside, loop, todo: open.filter((t) => this.canImplement(t.number)).map((t) => t.number), problem: problems.length ? `Cannot implement spec #${n}: ${problems.join(" Also: ")}` : undefined };
+  }
+
+  /**
+   * Queue the spec's `todo` tickets hands-off. The scheduler then follows the blockers.
+   * Live, done and failed runs are left alone (resume a failed one yourself), so calling this again is safe.
+   * A closed issue counts as done (see `closed`), even if an old run of it is not. Pressing again with nothing
+   * new to queue still gives queued tickets the current closed state and links.
+   */
+  async implementSpec(n: number): Promise<Run[]> {
+    // Read GitHub again (never start from old links), and use this one snapshot for the check and every change below.
+    const data = await this.specIssues(n, true);
+    const graph = this.buildGraph(n, data);
+    if (graph.problem) throw new Error(graph.problem);
+    const [, tickets, blockers] = data;
+    // Only now, with the graph checked, does the scheduler take on GitHub's state. A graph read or a refusal changes nothing.
+    // No await from here to `enqueue`, so the scheduler sees closed issues and new links together.
+    const before = [...this.closed].sort().join();
+    for (const i of [...tickets, ...blockers]) if (isOpen(i)) this.closed.delete(i.number); else this.closed.add(i.number);
+    if ([...this.closed].sort().join() !== before) {
+      const p = this.closedFile();
+      fs.writeFileSync(p + ".tmp", JSON.stringify([...this.closed]));
+      fs.renameSync(p + ".tmp", p);
+      this.emit("closed", [...this.closed]);
+    }
+    // Queued tickets follow the links just checked, not the ones they were queued with.
+    // A queued run of a closed issue (a ticket, or an outside blocker) is stopped.
+    for (const t of [...tickets, ...blockers]) {
+      const run = this.latestRun(t.number);
+      const now = t.blockedBy ?? [];
+      if (run?.status !== "queued") continue;
+      if (!isOpen(t)) {
+        // Done by hand: its pipeline must not start and change things again. The run stays as history.
+        run.status = "stopped";
+        run.error = `#${t.number} was closed on GitHub, so this run was stopped before it started. Resume it to run it anyway.`;
+        this.save(run);
+      } else if (tickets.includes(t) && run.blockedBy.join() !== now.join()) { run.blockedBy = now; this.save(run); }
+    }
+    return this.enqueue(tickets.filter((t) => graph.todo.includes(t.number)), { autoApprove: true }); // also pumps: closed blockers release queued runs
+  }
+
+  /** No run yet, or the newest one was stopped by you. */
+  private canImplement(issue: number) {
+    const run = this.latestRun(issue);
+    return !run || run.status === "stopped";
   }
 
   // ---------- scheduler ----------
@@ -369,7 +448,7 @@ export class Engine extends EventEmitter {
     const all = [...this.runs.values()];
     // These runs keep their slot. With maxParallel = 1 the next issue starts only
     // after this one is merged, so it never builds on unmerged or broken work.
-    const held = all.filter((r) => r.status === "waiting_approval" || r.status === "waiting_input" || (cfg.holdQueueOnProblem !== false && PROBLEM.includes(r.status))).length;
+    const held = all.filter((r) => !this.closed.has(r.issue.number)).filter((r) => r.status === "waiting_approval" || r.status === "waiting_input" || (cfg.holdQueueOnProblem !== false && PROBLEM.includes(r.status))).length;
     const queued = all.filter((r) => r.status === "queued").sort((a, b) => Number(!!b.resumed) - Number(!!a.resumed) || a.seq - b.seq);
     for (const run of queued) {
       if (this.active.has(run.id)) continue; // its old process is still closing
@@ -780,6 +859,26 @@ export function orderByBlockers(issues: Issue[]): Issue[] {
   };
   [...issues].sort((a, b) => a.number - b.number).forEach(visit);
   return out;
+}
+
+const isOpen = (i: Issue) => i.state !== "closed";
+
+/** One loop in the "blocked by" links of `tickets`, each ticket blocking the next and the last blocking the first. Empty = no loop. */
+export function findLoop(tickets: Issue[]): number[] {
+  const byNum = new Map(tickets.map((t) => [t.number, t]));
+  const clear = new Set<number>();
+  const path: number[] = []; // a ticket, its blocker, that one's blocker, ...
+  const visit = (n: number): number[] | undefined => {
+    const at = path.indexOf(n);
+    if (at >= 0) return path.slice(at);
+    if (clear.has(n) || !byNum.has(n)) return;
+    path.push(n);
+    for (const b of byNum.get(n)!.blockedBy ?? []) { const loop = visit(b); if (loop) return loop; }
+    path.pop();
+    clear.add(n);
+  };
+  for (const t of tickets) { const loop = visit(t.number); if (loop) return loop.reverse(); }
+  return [];
 }
 
 /** Depth of each ticket: 0 with no blockers among `tickets`, otherwise one more than its deepest blocker. */

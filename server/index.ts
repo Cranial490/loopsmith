@@ -41,12 +41,13 @@ const wrap = (fn: (req: express.Request, res: express.Response) => any) => async
   catch (e: any) { res.status(400).json({ error: e.message ?? String(e) }); }
 };
 
-app.get("/api/state", wrap(() => ({ repo, demo, config, runs: [...engine.runs.values()] })));
+app.get("/api/state", wrap(() => ({ repo, demo, config, runs: [...engine.runs.values()], closed: [...engine.closed] })));
 app.post("/api/runs/:id/answer", wrap((req) => engine.answer(String(req.params.id), String(req.body?.text ?? ""))));
 app.post("/api/runs/:id/send-back", wrap((req) => engine.sendBack(String(req.params.id), String(req.body?.notes ?? ""))));
 app.get("/api/issues", wrap(() => host.listIssues()));
 app.get("/api/specs", wrap(() => host.listSpecs().catch((e) => { throw new Error(`Could not load specs from GitHub: ${e?.message ?? e}`); })));
 app.get("/api/specs/:n", wrap((req) => engine.specGraph(Number(req.params.n), req.query.refresh === "1")));
+app.post("/api/specs/:n/implement", wrap((req) => engine.implementSpec(Number(req.params.n))));
 app.post("/api/runs", wrap((req) => engine.enqueue(req.body.issues ?? [], { autoApprove: !!req.body.autoApprove })));
 app.post("/api/runs/:id/approve", wrap((req) => engine.approve(String(req.params.id))));
 app.post("/api/runs/:id/reject", wrap((req) => engine.reject(String(req.params.id))));
@@ -84,6 +85,7 @@ setInterval(() => { for (const c of clients) c.write(": ping\n\n"); }, 20_000).u
 engine.on("run", (run) => broadcast("run", run));
 engine.on("log", (l) => broadcast("log", l));
 engine.on("removed", (id) => broadcast("removed", { id }));
+engine.on("closed", (closed) => broadcast("closed", closed));
 
 const webDist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../web/dist");
 if (fs.existsSync(webDist)) {
