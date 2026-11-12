@@ -736,3 +736,21 @@ test("implement a spec: a refused Implement or a graph read releases nothing", a
   await waitFor(() => r12.status === "done");
   engine.shutdown();
 });
+
+test("implement a spec: Continue stops the queued run of a ticket closed on GitHub", async () => {
+  const host = new DemoHost();
+  const { repo, cfg } = makeRepo();
+  cfg.pipeline = [{ id: "s", type: "shell", command: "test {{issue.number}} != 11" }];
+  const engine = new Engine(repo, () => cfg, host);
+  const [r11, r12, r13, r14] = await engine.implementSpec(10);
+  await waitFor(() => r11.status === "failed");
+
+  // #11 and #12 are done by hand and closed. #12 must not run; the tickets after them go on.
+  for (const n of [11, 12]) host.issues.find((i) => i.number === n)!.state = "closed";
+  assert.deepEqual(await engine.implementSpec(10), []);
+  assert.equal(r12.status, "stopped");
+  assert.match(r12.error!, /closed on GitHub/);
+  await waitFor(() => r13.status === "done" && r14.status === "done");
+  assert.deepEqual([r11.status, r12.status, r12.steps.length], ["failed", "stopped", 0]);
+  engine.shutdown();
+});

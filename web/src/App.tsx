@@ -50,7 +50,7 @@ export function App() {
       run: (r) => live(() => setRuns((m) => ({ ...m, [r.id]: newer(m[r.id], r) }))),
       removed: (id) => live(() => setRuns((m) => { const n = { ...m }; delete n[id]; return n; })),
       config: setConfig,
-      closed: setClosed,
+      closed: (c) => live(() => setClosed(c)), // after a state response in flight, like run events
       status: (ok) => { setLive(ok); if (ok && opened) load(); if (ok) opened = true; },
     });
   }, []);

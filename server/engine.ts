@@ -410,7 +410,13 @@ export class Engine extends EventEmitter {
     for (const t of tickets) {
       const run = this.latestRun(t.number);
       const now = t.blockedBy ?? [];
-      if (run?.status === "queued" && run.blockedBy.join() !== now.join()) { run.blockedBy = now; this.save(run); }
+      if (run?.status !== "queued") continue;
+      if (!isOpen(t)) {
+        // Done by hand: its pipeline must not start and change things again. The run stays as history.
+        run.status = "stopped";
+        run.error = `#${t.number} was closed on GitHub, so this run was stopped before it started. Resume it to run it anyway.`;
+        this.save(run);
+      } else if (run.blockedBy.join() !== now.join()) { run.blockedBy = now; this.save(run); }
     }
     return this.enqueue(tickets.filter((t) => graph.todo.includes(t.number)), { autoApprove: true }); // also pumps: closed blockers release queued runs
   }
