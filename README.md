@@ -28,7 +28,7 @@ You can also link it: `npm link`, then run `loopsmith` inside any repo.
 ## How it works
 
 - **One worktree per issue.** Each run gets its own folder (`../.loopsmith-worktrees/issue-N`) and branch (`loop/issue-N`), made from the newest `origin/<baseBranch>`. Your main checkout is not touched. The worktree is removed when the run is done.
-- **Max parallel = 1 (default)** means one issue at a time, all the way to merge. A run that waits for your approval keeps its slot. So issue #5 starts from a `main` that already has #4 merged. Raise the limit if your issues are independent.
+- **Max parallel = 1** means one issue at a time, all the way to merge. New configs start with 2; a saved config keeps its value. A run that waits for your approval keeps its slot. So issue #5 starts from a `main` that already has #4 merged. Raise the limit if your issues are independent.
 - **Pipeline = list of stages.** Stages run top to bottom. A stage can jump with rules, for example `if score >= 8 → approve, else → fix`. That is how the review loop works.
 - **Stage types**
   - `agent`: runs a harness with a prompt template. Can pull variables from the output with a regex (for example `score` from `SCORE: 8/10`, `Score 8/10` or `**Score:** 8/10`). Can continue the last session of the same harness (useful for "fix").
@@ -79,6 +79,8 @@ In **hands-off** mode nobody can answer, so agents are told not to ask and to re
 - A spec's tickets are its GitHub sub-issues, plus issues whose body has a `Part of #N` line or a `## Parent` heading followed by `#N`.
 - Tickets are in columns by depth: a ticket sits one column after its deepest blocker in the spec. Arrows go from a blocker to the ticket it blocks.
 - Each ticket shows the status of its latest run. A closed ticket with no run shows as closed. Click a ticket that has a run to open the run.
+- **Implement** queues every open ticket that has no run yet, hands-off: approvals pass on their own and agents do not ask questions. A ticket starts when its blockers are merged, and independent tickets run together up to max parallel. Press it again to continue the spec: it only queues tickets with no run. Resume failed or stopped runs yourself.
+- An open blocker outside the spec shows as a dashed warning node, and a loop in the blocking links shows in red. Implement is off in both cases, with the reason shown. A closed outside blocker counts as done.
 - Loopsmith reads a spec's tickets from GitHub once and keeps them. Run status updates live without asking GitHub again. Press ↻ to read GitHub again.
 
 ## Queue rules

@@ -165,7 +165,7 @@ export function defaultConfig(): Config {
     baseBranch: "main",
     worktreeDir: "../.loopsmith-worktrees",
     branchPrefix: "loop/issue-",
-    maxParallel: 1,
+    maxParallel: 2,
     removeWorktreeWhenDone: true,
     setupCommand: "",
     copyFiles: [".env"],

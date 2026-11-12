@@ -5,37 +5,52 @@ import { RunDetail } from "./RunDetail";
 
 const W = 220, H = 62, GAP_X = 72, GAP_Y = 16, LANE = 10;
 
-/** Tickets in columns by depth, with an arrow from each blocker to the ticket it blocks. */
+/**
+ * Tickets in columns by depth, with an arrow from each blocker to the ticket it blocks.
+ * Open blockers outside the spec are warning nodes in a first column of their own.
+ */
 function Graph({ graph, onOpenRun }: { graph: SpecGraph; onOpenRun: (id: string) => void }) {
-  const rows = new Map<number, number>(); // depth → nodes placed in that column so far
+  const rows = new Map<number, number>(); // column → nodes placed in that column so far
   const pos = new Map<number, { x: number; y: number }>();
-  for (const n of [...graph.nodes].sort((a, b) => a.number - b.number)) {
-    const row = rows.get(n.depth) ?? 0;
-    rows.set(n.depth, row + 1);
-    pos.set(n.number, { x: n.depth * (W + GAP_X), y: row * (H + GAP_Y) });
-  }
+  const shift = graph.outside.length ? 1 : 0;
+  const place = (number: number, col: number) => {
+    const row = rows.get(col) ?? 0;
+    rows.set(col, row + 1);
+    pos.set(number, { x: col * (W + GAP_X), y: row * (H + GAP_Y) });
+  };
+  for (const o of graph.outside) place(o.number, 0);
+  for (const n of [...graph.nodes].sort((a, b) => a.number - b.number)) place(n.number, n.depth + shift);
+  const edges = [...graph.outside.flatMap((o) => o.blocks.map((to) => ({ from: o.number, to, bad: true }))),
+    ...graph.edges.map((e) => ({ ...e, bad: graph.loop.some((n, k) => n === e.from && graph.loop[(k + 1) % graph.loop.length] === e.to) }))];
   const width = rows.size * (W + GAP_X) - GAP_X;
   const nodesHeight = Math.max(...rows.values()) * (H + GAP_Y) - GAP_Y;
   // An arrow that skips a column runs in its own lane below the nodes, so it never passes behind one.
-  const long = graph.edges.filter((e) => pos.get(e.to)!.x - pos.get(e.from)!.x > W + GAP_X);
+  const long = edges.filter((e) => pos.get(e.to)!.x - pos.get(e.from)!.x > W + GAP_X);
   const height = nodesHeight + (long.length ? GAP_Y + long.length * LANE : 0);
   return (
     <div className="graph-scroll">
       <div className="graph" style={{ width, height }}>
         <svg width={width} height={height} aria-hidden="true">
-          <defs><marker id="arrowhead" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 8 4 0 8z" /></marker></defs>
-          {graph.edges.map((e) => {
+          <defs><marker id="arrowhead" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 8 4 0 8z" /></marker><marker id="arrowhead-bad" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 8 4 0 8z" /></marker></defs>
+          {edges.map((e) => {
             const a = pos.get(e.from)!, b = pos.get(e.to)!;
             const x1 = a.x + W, y1 = a.y + H / 2, x2 = b.x, y2 = b.y + H / 2;
             const lane = long.indexOf(e);
             const d = lane < 0
               ? `M${x1} ${y1} C${x1 + GAP_X / 2} ${y1} ${x2 - GAP_X / 2} ${y2} ${x2} ${y2}`
               : `M${x1} ${y1} H${x1 + GAP_X / 2} V${nodesHeight + GAP_Y + lane * LANE} H${x2 - GAP_X / 2} V${y2} H${x2}`;
-            return <path key={`${e.from}-${e.to}`} d={d} markerEnd="url(#arrowhead)" />;
+            return <path key={`${e.from}-${e.to}`} d={d} className={e.bad ? "bad" : ""} markerEnd={`url(#arrowhead${e.bad ? "-bad" : ""})`} />;
           })}
         </svg>
+        {graph.outside.map((o) => (
+          <a key={o.number} className="gnode st-outside" style={{ left: pos.get(o.number)!.x, top: pos.get(o.number)!.y, width: W, height: H }}
+            href={o.url} target="_blank" rel="noreferrer" title={`#${o.number} ${o.title}\nOpen, and not a ticket of this spec. It blocks ${o.blocks.map((b) => `#${b}`).join(", ")}.`}>
+            <span className="gnode-top"><span className="num">#{o.number}</span><span className="gnode-status">⚠ Outside blocker</span></span>
+            <span className="gnode-title">{o.title}</span>
+          </a>
+        ))}
         {graph.nodes.map((n) => (
-          <button key={n.number} className={`gnode st-${n.status}`} style={{ left: pos.get(n.number)!.x, top: pos.get(n.number)!.y, width: W, height: H }}
+          <button key={n.number} className={`gnode st-${n.status}${graph.loop.includes(n.number) ? " in-loop" : ""}`} style={{ left: pos.get(n.number)!.x, top: pos.get(n.number)!.y, width: W, height: H }}
             disabled={!n.runId} onClick={() => n.runId && onOpenRun(n.runId)} title={`#${n.number} ${n.title}\n${NODE_LABEL[n.status]}${n.runId ? " · open the run" : ""}`}>
             <span className="gnode-top"><span className="num">#{n.number}</span><span className="gnode-status">{NODE_LABEL[n.status]}</span></span>
             <span className="gnode-title">{n.title}</span>
@@ -54,6 +69,17 @@ export function SpecsPage({ spec, refreshKey, config, onOpenRun, onCloseRun, run
   const [graph, setGraph] = useState<SpecGraph | null>(null);
   const [graphErr, setGraphErr] = useState<{ spec: number; message: string } | null>(null);
   const [reload, setReload] = useState(0);
+  const [implementing, setImplementing] = useState(false);
+  const [note, setNote] = useState<{ spec: number; text: string; bad?: boolean } | null>(null);
+  const implement = async (n: number) => {
+    setImplementing(true);
+    try {
+      const made = await api.implementSpec(n);
+      setNote({ spec: n, text: made.length ? `Queued ${made.map((r) => `#${r.issue.number}`).join(", ")} hands-off. Follow them here or in the Runs view.` : "Nothing new to queue. Resume failed or stopped runs from the run itself." });
+    } catch (e: any) { setNote({ spec: n, text: e.message, bad: true }); }
+    setImplementing(false);
+    setReload((k) => k + 1); // the engine read GitHub again, so show what it saw
+  };
 
   useEffect(() => { setListErr(""); api.specs().then(setSpecs, (e) => setListErr(e.message)); }, [reload]);
   // No spec in the URL: show the first one.
@@ -75,6 +101,7 @@ export function SpecsPage({ spec, refreshKey, config, onOpenRun, onCloseRun, run
   }, [spec, refreshKey, reload]);
   const shown = graph?.number === spec ? graph : null;
   const err = graphErr && graphErr.spec === spec ? graphErr.message : "";
+  const todo = shown?.nodes.filter((n) => n.status === "not_started").length ?? 0; // open tickets with no run
 
   return (
     <main className="runs-layout">
@@ -100,7 +127,16 @@ export function SpecsPage({ spec, refreshKey, config, onOpenRun, onCloseRun, run
             {err && <div className="error">{err}</div>}
             {spec && !shown && !err && <div className="muted">Loading spec #{spec}…</div>}
             {shown && <>
-              <h2><span className="num">#{shown.number}</span> {shown.title}</h2>
+              <div className="spec-head">
+                <h2><span className="num">#{shown.number}</span> {shown.title}</h2>
+                <button className="primary" disabled={implementing || !!shown.problem || todo === 0} onClick={() => implement(shown.number)}
+                  title="Queue every open ticket that has no run yet, hands-off: approvals pass on their own and agents do not ask questions. Tickets start when their blockers are merged.">
+                  {implementing ? "Queuing…" : `Implement${todo ? ` (${todo})` : ""}`}
+                </button>
+              </div>
+              {shown.problem && <div className="error">{shown.problem}</div>}
+              {!shown.problem && note?.spec === shown.number && <div className={note.bad ? "error" : "muted small-note"}>{note.text}</div>}
+              {!shown.problem && todo === 0 && shown.nodes.length > 0 && note?.spec !== shown.number && <div className="muted small-note">Every open ticket already has a run. Resume failed or stopped runs from the run itself.</div>}
               {shown.nodes.length ? <Graph graph={shown} onOpenRun={onOpenRun} /> : <div className="muted">This spec has no tickets yet. Add sub-issues, or a <code>Part of #{shown.number}</code> line to an issue.</div>}
               {shown.nodes.length > 0 && <p className="muted small-note">Arrows go from a blocker to the ticket it blocks. Click a ticket that has a run to open it.</p>}
               <div className="spec-body">{shown.body.trim() ? <Markdown text={shown.body} /> : <span className="muted">This spec has no description.</span>}</div>

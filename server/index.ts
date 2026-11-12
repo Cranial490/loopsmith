@@ -47,6 +47,7 @@ app.post("/api/runs/:id/send-back", wrap((req) => engine.sendBack(String(req.par
 app.get("/api/issues", wrap(() => host.listIssues()));
 app.get("/api/specs", wrap(() => host.listSpecs().catch((e) => { throw new Error(`Could not load specs from GitHub: ${e?.message ?? e}`); })));
 app.get("/api/specs/:n", wrap((req) => engine.specGraph(Number(req.params.n), req.query.refresh === "1")));
+app.post("/api/specs/:n/implement", wrap((req) => engine.implementSpec(Number(req.params.n))));
 app.post("/api/runs", wrap((req) => engine.enqueue(req.body.issues ?? [], { autoApprove: !!req.body.autoApprove })));
 app.post("/api/runs/:id/approve", wrap((req) => engine.approve(String(req.params.id))));
 app.post("/api/runs/:id/reject", wrap((req) => engine.reject(String(req.params.id))));

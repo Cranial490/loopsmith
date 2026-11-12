@@ -17,6 +17,7 @@ export const api = {
   issues: () => call<Issue[]>("GET", "/api/issues"),
   specs: () => call<Issue[]>("GET", "/api/specs"),
   spec: (n: number, refresh = false) => call<SpecGraph>("GET", `/api/specs/${n}${refresh ? "?refresh=1" : ""}`),
+  implementSpec: (n: number) => call<Run[]>("POST", `/api/specs/${n}/implement`),
   start: (issues: Issue[], autoApprove: boolean) => call<Run[]>("POST", "/api/runs", { issues, autoApprove }),
   approve: (id: string) => call("POST", `/api/runs/${id}/approve`),
   reject: (id: string) => call("POST", `/api/runs/${id}/reject`),
