@@ -71,6 +71,15 @@ In **hands-off** mode nobody can answer, so agents are told not to ask and to re
 - **Notify me** (top bar) gives a desktop notification when a run needs you. The tab title shows the count.
 - Each Claude step shows its cost, and each run shows the total.
 
+## Specs page
+
+**Specs ↗** in the top bar opens the Specs page (`/#/specs`) in a new window, so it can sit next to the Runs view.
+
+- It lists the open issues with the `spec` label. Select one to see its body and its tickets as a graph.
+- A spec's tickets are its GitHub sub-issues, plus issues whose body has a `Part of #N` line or a `## Parent` heading followed by `#N`.
+- Tickets are in columns by depth: a ticket sits one column after its deepest blocker in the spec. Arrows go from a blocker to the ticket it blocks.
+- Each ticket shows the status of its latest run. A closed ticket with no run shows as closed. Click a ticket that has a run to open the run.
+
 ## Queue rules
 
 - Runs start in issue-number order, but an issue blocked by issue N always starts after issue N. Blockers come from GitHub's native "blocked by" links and from a `Blocked by #N` section in the issue body (the format `/to-issues` writes); both are used together. The issue list shows `after #N`, and warns you when you select an issue without its open blocker.

@@ -27,7 +27,9 @@ input[type="checkbox"] { width: auto; accent-color: var(--accent); }
 .logo { color: var(--accent); font-size: 18px; }
 .top nav { display: flex; gap: 4px; }
 .top nav button { background: transparent; border-color: transparent; color: var(--muted); }
-.top nav button.on { color: var(--text); background: var(--panel2); border-color: var(--line); }
+.top nav a { padding: 6px 12px; border: 1px solid transparent; border-radius: 7px; color: var(--muted); }
+.top nav a:hover { text-decoration: none; color: var(--text); }
+.top nav button.on, .top nav a.on { color: var(--text); background: var(--panel2); border-color: var(--line); }
 .meta { margin-left: auto; display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 13px; }
 .repo { font-family: var(--mono); font-size: 12px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; } .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
@@ -198,3 +200,21 @@ select.from { width: auto; padding: 5px 8px; }
 .chip.asked { color: var(--warn); border-color: #5c4520; } .sdot.asked { background: var(--warn); }
 .approval.question { background: #2a2113; border-color: #5c4520; }
 .qtext { flex-basis: 100%; margin: 0; padding: 10px 12px; background: var(--bg); border-radius: 7px; font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; max-height: 260px; overflow: auto; }
+
+.issue.spec { grid-template-columns: 38px 1fr; color: var(--text); } .issue.spec:hover { text-decoration: none; }
+.spec-page { display: flex; flex-direction: column; gap: 14px; }
+.spec-page h2 { margin: 0; font-size: 18px; }
+.spec-body { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.small-note { margin: 0; font-size: 12.5px; }
+.graph-scroll { overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px; }
+.graph { position: relative; }
+.graph svg { position: absolute; inset: 0; overflow: visible; }
+.graph svg path { fill: none; stroke: var(--muted); stroke-width: 1.5; } .graph svg marker path { fill: var(--muted); stroke: none; }
+.gnode { --st: var(--muted); position: absolute; display: flex; flex-direction: column; gap: 3px; padding: 8px 10px; text-align: left; background: var(--panel2); border: 1px solid var(--line); border-left: 3px solid var(--st); border-radius: 8px; }
+.gnode:disabled { opacity: 1; }
+.gnode-top { display: flex; justify-content: space-between; gap: 8px; }
+.gnode-status { font-size: 11.5px; color: var(--st); white-space: nowrap; }
+.gnode-title { font-size: 13px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gnode.st-not_started { --st: var(--line); } .gnode.st-not_started .gnode-status { color: var(--muted); }
+.gnode.st-running { --st: var(--run); } .gnode.st-waiting { --st: var(--wait); }
+.gnode.st-done, .gnode.st-closed { --st: var(--ok); } .gnode.st-failed { --st: var(--bad); } .gnode.st-needs_attention { --st: var(--warn); }

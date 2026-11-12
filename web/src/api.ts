@@ -1,10 +1,10 @@
-import type { Run, Step } from "../../server/engine";
+import type { Run, Step, SpecGraph, NodeStatus } from "../../server/engine";
 import type { TokenUsage } from "../../server/streams";
 export { sumUsage } from "../../server/streams";
 import type { Config, Stage, HarnessConfig } from "../../server/config";
 import type { Issue } from "../../server/github";
 import type { Chunk } from "./format";
-export type { Run, Step, Config, Stage, HarnessConfig, Issue, TokenUsage };
+export type { Run, Step, SpecGraph, NodeStatus, Config, Stage, HarnessConfig, Issue, TokenUsage };
 
 async function call<T>(method: string, url: string, body?: unknown): Promise<T> {
   const res = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
@@ -15,6 +15,8 @@ async function call<T>(method: string, url: string, body?: unknown): Promise<T> 
 export const api = {
   state: () => call<{ repo: string; demo: boolean; config: Config; runs: Run[] }>("GET", "/api/state"),
   issues: () => call<Issue[]>("GET", "/api/issues"),
+  specs: () => call<Issue[]>("GET", "/api/specs"),
+  spec: (n: number) => call<SpecGraph>("GET", `/api/specs/${n}`),
   start: (issues: Issue[], autoApprove: boolean) => call<Run[]>("POST", "/api/runs", { issues, autoApprove }),
   approve: (id: string) => call("POST", `/api/runs/${id}/approve`),
   reject: (id: string) => call("POST", `/api/runs/${id}/reject`),
@@ -52,6 +54,10 @@ export function connectEvents(handlers: { run: (r: Run) => void; removed: (id: s
 export const STATUS_LABEL: Record<string, string> = {
   queued: "Queued", running: "Running", waiting_approval: "Needs approval", waiting_input: "Has a question", done: "Done", failed: "Failed",
   stopped: "Stopped", needs_attention: "Needs attention", interrupted: "Interrupted",
+};
+
+export const NODE_LABEL: Record<NodeStatus, string> = {
+  not_started: "Not started", queued: "Queued", running: "Running", waiting: "Waiting", done: "Done", failed: "Failed", needs_attention: "Needs attention", closed: "Closed",
 };
 
 export function ago(iso?: string) {

@@ -1,11 +1,15 @@
 import { exec } from "./proc.js";
 
-export interface Issue { number: number; title: string; body?: string; url?: string; labels?: string[]; blockedBy?: number[] }
+export interface Issue { number: number; title: string; body?: string; url?: string; labels?: string[]; blockedBy?: number[]; state?: "open" | "closed" }
 export interface PullRequest { number: number; url: string; state?: string }
 
 export interface GitHost {
   listIssues(): Promise<Issue[]>;
   getIssue(n: number): Promise<Issue>;
+  /** Open issues labelled `spec`. */
+  listSpecs(): Promise<Issue[]>;
+  /** The tickets of spec `spec`, open and closed, with `state` and `blockedBy` set. */
+  listTickets(spec: number): Promise<Issue[]>;
   findPr(branch: string): Promise<PullRequest | undefined>;
 }
 
@@ -15,7 +19,25 @@ export class GhCli implements GitHost {
 
   async listIssues(): Promise<Issue[]> {
     const out = await exec("gh", ["issue", "list", "--state", "open", "--limit", "200", "--json", "number,title,body,url,labels"], this.repo);
-    const issues: Issue[] = JSON.parse(out).map((i: any) => ({ number: i.number, title: i.title, body: i.body, url: i.url, labels: i.labels?.map((l: any) => l.name) ?? [] }));
+    return this.withBlockers(JSON.parse(out).map(fromGh));
+  }
+
+  async listSpecs(): Promise<Issue[]> {
+    const out = await exec("gh", ["issue", "list", "--state", "open", "--label", SPEC_LABEL, "--limit", "200", "--json", "number,title,body,url,labels"], this.repo);
+    return JSON.parse(out).map(fromGh);
+  }
+
+  async listTickets(spec: number): Promise<Issue[]> {
+    // ponytail: reads the newest 500 issues to find text parent lines. Use a search query if a repo outgrows this.
+    const [subs, all] = await Promise.all([
+      exec("gh", ["api", `repos/{owner}/{repo}/issues/${spec}/sub_issues?per_page=100`], this.repo),
+      exec("gh", ["issue", "list", "--state", "all", "--limit", "500", "--json", "number,title,body,url,labels,state"], this.repo),
+    ]);
+    const issues: Issue[] = JSON.parse(all).map(fromGh);
+    return this.withBlockers(ticketsOf(spec, issues, parseSubIssues(JSON.parse(subs), issues.find((i) => i.number === spec) ?? { number: spec })));
+  }
+
+  private async withBlockers(issues: Issue[]): Promise<Issue[]> {
     // ponytail: one `gh api` call per issue, 10 at a time. Use one GraphQL query if big repos make this slow.
     const result: Issue[] = [];
     for (let k = 0; k < issues.length; k += 10) result.push(...(await Promise.all(issues.slice(k, k + 10).map((i) => withNativeBlockers(i, this.dependencies)))));
@@ -35,6 +57,11 @@ export class GhCli implements GitHost {
     return JSON.parse(out)[0];
   }
 }
+
+export const SPEC_LABEL = "spec";
+
+/** An issue as `gh issue list --json ...` prints it. */
+const fromGh = (i: any): Issue => ({ number: i.number, title: i.title, body: i.body, url: i.url, labels: i.labels?.map((l: any) => l.name) ?? [], ...(i.state ? { state: i.state.toLowerCase() } : {}) });
 
 /**
  * Issue numbers after a "Blocked by" line or heading (the format /to-issues writes).
@@ -63,6 +90,24 @@ export function parseDependencies(json: unknown, issue: Pick<Issue, "number" | "
     .map((d) => d.number as number)
     .filter((n) => n !== issue.number);
   return [...new Set(nums)];
+}
+
+/**
+ * Ticket numbers from the JSON of GitHub's sub-issues endpoint (`.../issues/N/sub_issues`).
+ * It is a list of issues like the dependencies endpoint, so the same rules apply.
+ */
+export const parseSubIssues = parseDependencies;
+
+/** The spec number from a `Part of #N` line or a `## Parent` heading followed by `#N`. */
+export function parseParent(body: string | undefined): number | undefined {
+  const m = body?.match(/^[ \t>*_-]*(?:part of|#{1,6}[ \t]*parent)[\s:*_]*#(\d+)/im);
+  return m ? Number(m[1]) : undefined;
+}
+
+/** The tickets of a spec: its sub-issues plus issues with a parent line for it. Each once, never the spec itself. */
+export function ticketsOf(spec: number, all: Issue[], subIssues: number[]): Issue[] {
+  const subs = new Set(subIssues);
+  return all.filter((i) => i.number !== spec && (subs.has(i.number) || parseParent(i.body) === spec)).sort((a, b) => a.number - b.number);
 }
 
 /**
