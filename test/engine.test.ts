@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { defaultConfig, loadConfig, validateConfig } from "../server/config.ts";
-import { Engine, type Run } from "../server/engine.ts";
+import { Engine, withModel, type Run } from "../server/engine.ts";
 import { DemoHost } from "../server/demo.ts";
 import { evalCondition, extractVars, render } from "../server/template.ts";
 
@@ -37,6 +37,13 @@ test("template + conditions", () => {
   assert.equal(evalCondition("score >= 8", { vars: {} }), false);
   assert.deepEqual(extractVars("SCORE: 4/10\n...\nSCORE: 8.5 / 10", { score: "SCORE:\\s*(\\d+(?:\\.\\d+)?)\\s*/\\s*10" }), { score: 8.5 });
   assert.deepEqual(validateConfig(defaultConfig()), []);
+});
+
+test("model args go before the prompt, or at the end", () => {
+  const m = ["--model", "{{model}}"];
+  assert.deepEqual(withModel(["exec", "--json", "resume", "{{sessionId}}", "{{prompt}}"], m), ["exec", "--json", "resume", "{{sessionId}}", "--model", "{{model}}", "{{prompt}}"]);
+  assert.deepEqual(withModel(["run", "--prompt={{prompt}}"], m), ["run", "--prompt={{prompt}}", "--model", "{{model}}"]);
+  assert.deepEqual(withModel(["-p", "{{prompt}}"], []), ["-p", "{{prompt}}"]);
 });
 
 test("default score regex reads the ways agents write a score", () => {

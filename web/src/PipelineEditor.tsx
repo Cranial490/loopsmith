@@ -88,7 +88,7 @@ export function PipelineEditor({ config, onSaved }: { config: Config; onSaved: (
                   <div className="node-top">
                     <span className="node-type">{s.type}</span>
                     <span className="node-name">{s.name ?? s.id}</span>
-                    {s.type === "agent" && <span className="pill">{draft.harnesses[s.harness]?.label ?? s.harness}</span>}
+                    {s.type === "agent" && <span className="pill">{draft.harnesses[s.harness]?.label ?? s.harness}{s.model ? ` · ${s.model}` : ""}</span>}
                   </div>
                   {s.type === "agent" && (
                     <select value={s.harness} onClick={(e) => e.stopPropagation()} onChange={(e) => setStage(s.id, { harness: e.target.value } as any)}>
@@ -148,6 +148,9 @@ export function PipelineEditor({ config, onSaved }: { config: Config; onSaved: (
   );
 }
 
+// ponytail: hand-kept suggestions (the CLIs have no command that lists models); any name can be typed.
+const MODEL_HINTS: Record<string, string[]> = { claude: ["fable", "opus", "sonnet", "haiku"], codex: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] };
+
 function StageForm({ stage, ids, harnesses, onChange, onRename, onMove, onDelete }: {
   stage: Stage; ids: string[]; harnesses: Record<string, HarnessConfig>;
   onChange: (p: Partial<Stage>) => void; onRename: (id: string) => void; onMove: (d: -1 | 1) => void; onDelete: () => void;
@@ -183,6 +186,11 @@ function StageForm({ stage, ids, harnesses, onChange, onRename, onMove, onDelete
               <select value={stage.harness} onChange={(e) => onChange({ harness: e.target.value } as any)}>
                 {Object.entries(harnesses).map(([k, h]) => <option key={k} value={k}>{h.label ?? k}</option>)}
               </select>
+            </label>
+            <label>Model (empty = the CLI's default)
+              <input value={stage.model ?? ""} list={`models-${stage.harness}`} placeholder="default" spellCheck={false}
+                onChange={(e) => onChange({ model: e.target.value.trim() || undefined } as any)} />
+              <datalist id={`models-${stage.harness}`}>{(MODEL_HINTS[stage.harness] ?? []).map((m) => <option key={m} value={m} />)}</datalist>
             </label>
             <label className="check inline"><input type="checkbox" checked={!!stage.continueSession} onChange={(e) => onChange({ continueSession: e.target.checked } as any)} /> Continue an earlier session of this harness</label>
             <label>Continue only from these stages (ids, comma separated; empty = any)<input value={(stage.continueFrom ?? []).join(", ")} disabled={!stage.continueSession} onChange={(e) => onChange({ continueFrom: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) } as any)} /></label>
@@ -264,6 +272,7 @@ function HarnessesForm({ harnesses, onChange }: { harnesses: Record<string, Harn
             <label>Args to continue one exact session (uses {"{{sessionId}}"})<textarea rows={6} value={lines(h.resumeArgs)} onChange={(e) => set(k, { resumeArgs: e.target.value ? parse(e.target.value) : undefined })} spellCheck={false} /></label>
             <label>Regex that finds the session id in the output<input value={h.sessionIdPattern ?? ""} onChange={(e) => set(k, { sessionIdPattern: e.target.value || undefined })} spellCheck={false} /></label>
             <label>Fallback: args to continue the most recent session<textarea rows={4} value={lines(h.continueArgs)} onChange={(e) => set(k, { continueArgs: e.target.value ? parse(e.target.value) : undefined })} spellCheck={false} /></label>
+            <label>Args to set the model (uses {"{{model}}"}; go before {"{{prompt}}"}; empty = --model {"{{model}}"})<textarea rows={2} value={lines(h.modelArgs)} onChange={(e) => set(k, { modelArgs: e.target.value ? parse(e.target.value) : undefined })} spellCheck={false} /></label>
             <label>Output format
               <select value={h.format ?? "text"} onChange={(e) => set(k, { format: e.target.value as any })}>
                 <option value="text">text</option>

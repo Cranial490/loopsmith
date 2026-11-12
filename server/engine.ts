@@ -553,7 +553,9 @@ export class Engine extends EventEmitter {
       }
       sessionPattern = h.sessionIdPattern;
       command = h.command;
-      args = template.map((a) => (a === "{{prompt}}" ? prompt : render(a, { ...ctx, prompt, outputFile, handoffFile, sessionId: prev?.sessionId, newSessionId })));
+      const model = s.model?.trim();
+      template = withModel(template, model ? h.modelArgs ?? DEFAULT_MODEL_ARGS : []);
+      args = template.map((a) => (a === "{{prompt}}" ? prompt : render(a, { ...ctx, prompt, outputFile, handoffFile, sessionId: prev?.sessionId, newSessionId, model })));
       format = h.format ?? "text";
       env = h.env;
       step.harness = s.harness;
@@ -742,4 +744,13 @@ export function formatHandoffs(notes: HandoffNote[], maxChars: number): string {
   while (parts.length > 1 && parts.join("\n\n").length > maxChars) { parts.shift(); dropped++; }
   const head = "## Handoff notes from earlier agents (oldest first)" + (dropped ? `\n(${dropped} older note(s) left out to save space)` : "");
   return `${head}\n\n${parts.join("\n\n")}`;
+}
+
+const DEFAULT_MODEL_ARGS = ["--model", "{{model}}"];
+
+/** Put the model args just before the {{prompt}} arg (after any subcommand like `exec resume`), or at the end. */
+export function withModel(args: string[], modelArgs: string[]): string[] {
+  if (!modelArgs.length) return args;
+  const i = args.indexOf("{{prompt}}");
+  return i < 0 ? [...args, ...modelArgs] : [...args.slice(0, i), ...modelArgs, ...args.slice(i)];
 }
