@@ -681,7 +681,8 @@ test("implement a spec: closed issues are remembered after a restart, without re
   const [old] = engine.enqueue([{ number: 11, title: "a" }], { autoApprove: true });
   await waitFor(() => old.status === "failed");
   host.issues.find((i) => i.number === 11)!.state = "closed";
-  await engine.specGraph(10);
+  const runs = await engine.implementSpec(10); // closed state is taken on when Implement accepts the graph
+  await waitFor(() => runs.every((r) => r.status === "done"));
   engine.shutdown();
 
   const offline = new DemoHost();
@@ -709,5 +710,29 @@ test("implement a spec: pressing again gives queued tickets the current blocking
   assert.deepEqual([...r13.blockedBy].sort(), [11, 12]);
   await waitFor(() => r12.status === "done");
   assert.equal(r13.status, "queued");
+  engine.shutdown();
+});
+
+test("implement a spec: a refused Implement or a graph read releases nothing", async () => {
+  const host = new DemoHost();
+  const { repo, cfg } = makeRepo();
+  cfg.pipeline = [{ id: "s", type: "shell", command: "test {{issue.number}} != 11" }];
+  const engine = new Engine(repo, () => cfg, host);
+  const [r11, r12] = await engine.implementSpec(10);
+  await waitFor(() => r11.status === "failed");
+
+  // #11 is closed, but #12 gets an open outside blocker. Implement is refused, so #12 must not start.
+  host.issues.find((i) => i.number === 11)!.state = "closed";
+  host.dependencies[12] = [{ number: 1 }];
+  await assert.rejects(engine.implementSpec(10), /#12 is blocked by #1/);
+  await engine.specGraph(10, true);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(r12.status, "queued");
+  assert.deepEqual(engine.waitingFor(r12), [11]);
+
+  // Once #1 is closed too, Implement accepts the graph and #12 goes on.
+  host.issues.find((i) => i.number === 1)!.state = "closed";
+  assert.deepEqual(await engine.implementSpec(10), []);
+  await waitFor(() => r12.status === "done");
   engine.shutdown();
 });

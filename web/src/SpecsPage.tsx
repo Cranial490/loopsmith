@@ -75,7 +75,7 @@ export function SpecsPage({ spec, refreshKey, config, onOpenRun, onCloseRun, run
     setImplementing(true);
     try {
       const made = await api.implementSpec(n);
-      setNote({ spec: n, text: made.length ? `Queued ${made.map((r) => `#${r.issue.number}`).join(", ")} hands-off. Follow them here or in the Runs view.` : "Nothing new to queue. Resume failed runs from the run itself." });
+      setNote({ spec: n, text: made.length ? `Queued ${made.map((r) => `#${r.issue.number}`).join(", ")} hands-off. Follow them here or in the Runs view.` : "Nothing new to queue. Queued tickets now follow the current links and closed issues. Resume failed runs from the run itself." });
     } catch (e: any) { setNote({ spec: n, text: e.message, bad: true }); }
     setImplementing(false);
     setReload((k) => k + 1); // the engine read GitHub again, so show what it saw
@@ -129,14 +129,14 @@ export function SpecsPage({ spec, refreshKey, config, onOpenRun, onCloseRun, run
             {shown && <>
               <div className="spec-head">
                 <h2><span className="num">#{shown.number}</span> {shown.title}</h2>
-                <button className="primary" disabled={implementing || !!shown.problem || todo === 0} onClick={() => implement(shown.number)}
-                  title="Queue every open ticket that has no run yet, hands-off: approvals pass on their own and agents do not ask questions. Tickets start when their blockers are merged.">
-                  {implementing ? "Queuing…" : `Implement${todo ? ` (${todo})` : ""}`}
+                <button className="primary" disabled={implementing || !!shown.problem || shown.nodes.length === 0} onClick={() => implement(shown.number)}
+                  title="Queue every open ticket that has no run yet (or a stopped one), hands-off: approvals pass on their own and agents do not ask questions. Tickets start when their blockers are merged. Press again to continue: queued tickets then follow the current links and closed issues.">
+                  {implementing ? "Queuing…" : todo ? `Implement (${todo})` : "Continue"}
                 </button>
               </div>
               {shown.problem && <div className="error">{shown.problem}</div>}
               {!shown.problem && note?.spec === shown.number && <div className={note.bad ? "error" : "muted small-note"}>{note.text}</div>}
-              {!shown.problem && todo === 0 && shown.nodes.length > 0 && note?.spec !== shown.number && <div className="muted small-note">Every open ticket already has a live, done or failed run. Resume failed runs from the run itself.</div>}
+              {!shown.problem && todo === 0 && shown.nodes.length > 0 && note?.spec !== shown.number && <div className="muted small-note">Every open ticket already has a live, done or failed run. Press Continue after you close a blocker or change links. Resume failed runs from the run itself.</div>}
               {shown.nodes.length ? <Graph graph={shown} onOpenRun={onOpenRun} /> : <div className="muted">This spec has no tickets yet. Add sub-issues, or a <code>Part of #{shown.number}</code> line to an issue.</div>}
               {shown.nodes.length > 0 && <p className="muted small-note">Arrows go from a blocker to the ticket it blocks. Click a ticket that has a run to open it.</p>}
               <div className="spec-body">{shown.body.trim() ? <Markdown text={shown.body} /> : <span className="muted">This spec has no description.</span>}</div>

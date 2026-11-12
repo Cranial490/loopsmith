@@ -326,7 +326,7 @@ export class Engine extends EventEmitter {
   }
 
   /**
-   * Issues GitHub said are closed, learned when a spec is read. A closed issue counts as done:
+   * Issues GitHub said are closed, taken on when Implement accepts a spec's graph. A closed issue counts as done:
    * it blocks nothing, and its old runs do not hold a slot. Their history is kept.
    * Saved to `closed.json`, so a restart keeps it.
    */
@@ -357,15 +357,6 @@ export class Engine extends EventEmitter {
       const nums = [...new Set(tickets.filter(isOpen).flatMap((t) => (t.blockedBy ?? []).filter((b) => !inSpec.has(b))))];
       // A blocker that cannot be read counts as open: refusing is the safe side.
       const blockers = await Promise.all(nums.map((b) => this.host.getIssue(b).catch(() => undefined).then((i): Issue => i ?? { number: b, title: "(could not read this issue)" })));
-      const before = [...this.closed].sort().join();
-      for (const i of [...tickets, ...blockers]) if (isOpen(i)) this.closed.delete(i.number); else this.closed.add(i.number);
-      if ([...this.closed].sort().join() !== before) {
-        const p = this.closedFile();
-        fs.writeFileSync(p + ".tmp", JSON.stringify([...this.closed]));
-        fs.renameSync(p + ".tmp", p);
-        this.emit("closed", [...this.closed]);
-        setImmediate(() => this.pump()); // a closed issue may free a slot or a blocked run
-      }
       return [spec, tickets, blockers];
     }).catch((e) => {
       if (this.specCache.get(n) === entry) this.specCache.delete(n);
@@ -398,12 +389,23 @@ export class Engine extends EventEmitter {
   /**
    * Queue the spec's `todo` tickets hands-off. The scheduler then follows the blockers.
    * Live, done and failed runs are left alone (resume a failed one yourself), so calling this again is safe.
-   * A closed issue counts as done (see `closed`), even if an old run of it is not.
+   * A closed issue counts as done (see `closed`), even if an old run of it is not. Pressing again with nothing
+   * new to queue still gives queued tickets the current closed state and links.
    */
   async implementSpec(n: number): Promise<Run[]> {
     const graph = await this.specGraph(n, true); // read GitHub again: never start from old links
     if (graph.problem) throw new Error(graph.problem);
-    const [, tickets] = await this.specIssues(n, false);
+    const [, tickets, blockers] = await this.specIssues(n, false);
+    // Only now, with the graph checked, does the scheduler take on GitHub's state. A graph read or a refusal changes nothing.
+    // No await from here to `enqueue`, so the scheduler sees closed issues and new links together.
+    const before = [...this.closed].sort().join();
+    for (const i of [...tickets, ...blockers]) if (isOpen(i)) this.closed.delete(i.number); else this.closed.add(i.number);
+    if ([...this.closed].sort().join() !== before) {
+      const p = this.closedFile();
+      fs.writeFileSync(p + ".tmp", JSON.stringify([...this.closed]));
+      fs.renameSync(p + ".tmp", p);
+      this.emit("closed", [...this.closed]);
+    }
     // Queued tickets follow the links just checked, not the ones they were queued with.
     for (const t of tickets) {
       const run = this.latestRun(t.number);
