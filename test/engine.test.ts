@@ -629,7 +629,7 @@ test("implement a spec: a closed blocker counts as done, even with an old stoppe
   const host = new DemoHost();
   const { repo, cfg } = makeRepo();
   cfg.pipeline = [{ id: "s", type: "shell", command: "test {{issue.number}} != 1" }];
-  cfg.maxParallel = 4; // the old failed and waiting runs keep their slots
+  assert.equal(cfg.maxParallel, 2); // the old failed and waiting runs of closed issues must not hold the two slots
   const engine = new Engine(repo, () => cfg, host);
   // Old runs: #1 failed, #2 stopped. Then both issues are closed (e.g. done by hand).
   const [old1] = engine.enqueue([{ number: 1, title: "a" }], { autoApprove: true });
@@ -649,8 +649,25 @@ test("implement a spec: a closed blocker counts as done, even with an old stoppe
   cfg.pipeline = [{ id: "s", type: "shell", command: "true" }];
   const runs = await engine.implementSpec(10);
   assert.deepEqual(runs.map((r) => r.issue.number), [11, 12, 13, 14]);
-  assert.deepEqual(runs.map((r) => [...r.blockedBy].sort()), [[], [11], [11], [12, 13]]);
   await waitFor(() => runs.every((r) => r.status === "done"));
   assert.deepEqual([old1.status, old2.status], ["failed", "stopped"]);
+  engine.shutdown();
+});
+
+test("implement a spec: pressing again releases tickets whose blocker was closed meanwhile", async () => {
+  const host = new DemoHost();
+  const { repo, cfg } = makeRepo();
+  cfg.pipeline = [{ id: "s", type: "shell", command: "test {{issue.number}} != 11" }];
+  const engine = new Engine(repo, () => cfg, host);
+  const [r11, r12, r13, r14] = await engine.implementSpec(10);
+  await waitFor(() => r11.status === "failed");
+  await new Promise((r) => setTimeout(r, 300));
+  assert.deepEqual([r12.status, r13.status, r14.status], ["queued", "queued", "queued"]);
+
+  // #11 is done by hand and closed. Implement again queues nothing new, but the tickets behind #11 go on.
+  host.issues.find((i) => i.number === 11)!.state = "closed";
+  assert.deepEqual(await engine.implementSpec(10), []);
+  await waitFor(() => [r12, r13, r14].every((r) => r.status === "done"));
+  assert.equal(r11.status, "failed"); // its history is kept
   engine.shutdown();
 });

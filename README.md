@@ -80,7 +80,7 @@ In **hands-off** mode nobody can answer, so agents are told not to ask and to re
 - Tickets are in columns by depth: a ticket sits one column after its deepest blocker in the spec. Arrows go from a blocker to the ticket it blocks.
 - Each ticket shows the status of its latest run. A closed ticket with no run shows as closed. Click a ticket that has a run to open the run.
 - **Implement** queues every open ticket that has no run yet, hands-off: approvals pass on their own and agents do not ask questions. A ticket starts when its blockers are merged, and independent tickets run together up to max parallel. Press it again to continue the spec: it only queues tickets with no run, or whose run you stopped. Live, done and failed runs are left alone; resume failed runs yourself.
-- An open blocker outside the spec shows as a dashed warning node, and a loop in the blocking links shows in red. Implement is off in both cases, with the reason shown. A closed outside blocker counts as done.
+- An open blocker outside the spec shows as a dashed warning node, and a loop in the blocking links shows in red. Implement is off in both cases, with the reason shown. A closed blocker counts as done: it blocks nothing, and its old failed or waiting runs no longer hold a slot. Close a ticket you finished by hand, then press Implement to let the tickets behind it go on.
 - Loopsmith reads a spec's tickets from GitHub once and keeps them. Run status updates live without asking GitHub again. Press ↻ to read GitHub again.
 
 ## Queue rules

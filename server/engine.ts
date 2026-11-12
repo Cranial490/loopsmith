@@ -324,9 +324,17 @@ export class Engine extends EventEmitter {
     return [...this.runs.values()].filter((r) => r.issue.number === issue).sort((a, b) => b.seq - a.seq)[0];
   }
 
+  /**
+   * Issues GitHub said are closed, learned when a spec is read. A closed issue counts as done:
+   * it blocks nothing, and its old runs do not hold a slot. Their history is kept.
+   * ponytail: in memory only, so after a restart it is empty until a spec is read again.
+   */
+  private closed = new Set<number>();
+
   /** Issue numbers this queued run still waits for. */
   waitingFor(run: Run): number[] {
     return run.blockedBy.filter((n) => {
+      if (this.closed.has(n)) return false;
       const latest = this.latestRun(n);
       return latest && latest.status !== "done";
     });
@@ -347,6 +355,8 @@ export class Engine extends EventEmitter {
       const nums = [...new Set(tickets.filter(isOpen).flatMap((t) => (t.blockedBy ?? []).filter((b) => !inSpec.has(b))))];
       // A blocker that cannot be read counts as open: refusing is the safe side.
       const blockers = await Promise.all(nums.map((b) => this.host.getIssue(b).catch(() => undefined).then((i): Issue => i ?? { number: b, title: "(could not read this issue)" })));
+      for (const i of [...tickets, ...blockers]) if (isOpen(i)) this.closed.delete(i.number); else this.closed.add(i.number);
+      setImmediate(() => this.pump()); // a closed issue may free a slot or a blocked run
       return [spec, tickets, blockers];
     }).catch((e) => {
       if (this.specCache.get(n) === entry) this.specCache.delete(n);
@@ -379,15 +389,13 @@ export class Engine extends EventEmitter {
   /**
    * Queue the spec's `todo` tickets hands-off. The scheduler then follows the blockers.
    * Live, done and failed runs are left alone (resume a failed one yourself), so calling this again is safe.
-   * Closed blockers are dropped from the new runs: a closed issue counts as done, even if an old run of it is not.
+   * A closed issue counts as done (see `closed`), even if an old run of it is not.
    */
   async implementSpec(n: number): Promise<Run[]> {
     const graph = await this.specGraph(n, true); // read GitHub again: never start from old links
     if (graph.problem) throw new Error(graph.problem);
-    const [, tickets, blockers] = await this.specIssues(n, false);
-    const closed = new Set([...tickets, ...blockers].filter((i) => !isOpen(i)).map((i) => i.number));
-    const todo = tickets.filter((t) => graph.todo.includes(t.number)).map((t) => ({ ...t, blockedBy: (t.blockedBy ?? []).filter((b) => !closed.has(b)) }));
-    return this.enqueue(todo, { autoApprove: true });
+    const [, tickets] = await this.specIssues(n, false);
+    return this.enqueue(tickets.filter((t) => graph.todo.includes(t.number)), { autoApprove: true }); // also pumps: closed blockers release queued runs
   }
 
   /** No run yet, or the newest one was stopped by you. */
@@ -411,7 +419,7 @@ export class Engine extends EventEmitter {
     const all = [...this.runs.values()];
     // These runs keep their slot. With maxParallel = 1 the next issue starts only
     // after this one is merged, so it never builds on unmerged or broken work.
-    const held = all.filter((r) => r.status === "waiting_approval" || r.status === "waiting_input" || (cfg.holdQueueOnProblem !== false && PROBLEM.includes(r.status))).length;
+    const held = all.filter((r) => !this.closed.has(r.issue.number)).filter((r) => r.status === "waiting_approval" || r.status === "waiting_input" || (cfg.holdQueueOnProblem !== false && PROBLEM.includes(r.status))).length;
     const queued = all.filter((r) => r.status === "queued").sort((a, b) => Number(!!b.resumed) - Number(!!a.resumed) || a.seq - b.seq);
     for (const run of queued) {
       if (this.active.has(run.id)) continue; // its old process is still closing
