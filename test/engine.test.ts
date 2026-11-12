@@ -478,3 +478,17 @@ test("spec graph: a GitHub failure is a readable error", async () => {
   await assert.rejects(engine.specGraph(10), /Could not load the tickets of spec #10 from GitHub: gh api failed: HTTP 502/);
   engine.shutdown();
 });
+
+test("gh loader: a big repo still loads a spec's tickets, and every open spec is listed", async () => {
+  const { GhCli } = await import("../server/github.ts");
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "ls-gh-"));
+  fs.symlinkSync(path.resolve("test/fixtures/fake-gh.mjs"), path.join(bin, "gh"));
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${oldPath}`;
+  try {
+    const gh = new GhCli(process.cwd());
+    const tickets = await gh.listTickets(10);
+    assert.deepEqual(tickets.map((t) => t.number), [5, 300]); // never the pull request #6
+    assert.equal((await gh.listSpecs()).length, 250);
+  } finally { process.env.PATH = oldPath; }
+});

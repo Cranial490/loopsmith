@@ -23,19 +23,33 @@ export class GhCli implements GitHost {
   }
 
   async listSpecs(): Promise<Issue[]> {
-    const out = await exec("gh", ["issue", "list", "--state", "open", "--label", SPEC_LABEL, "--limit", "200", "--json", "number,title,body,url,labels"], this.repo);
-    return JSON.parse(out).map(fromGh);
+    const specs: Issue[] = [];
+    for await (const page of this.pages(`repos/{owner}/{repo}/issues?state=open&labels=${SPEC_LABEL}`)) specs.push(...page.filter((i) => !i.pull_request).map(fromRest));
+    return specs;
   }
 
   async listTickets(spec: number): Promise<Issue[]> {
-    // Every issue in the repo (pull requests left out), so old text-parent tickets are found too.
-    // ponytail: pages through all issues on each call. Use a search query if a repo gets very big.
-    const ndjson = (jq: string, path: string) => exec("gh", ["api", "--paginate", path, "--jq", jq], this.repo);
-    const [subs, all] = await Promise.all([
-      ndjson(".[]", `repos/{owner}/{repo}/issues/${spec}/sub_issues?per_page=100`),
-      ndjson(".[] | select(.pull_request | not)", "repos/{owner}/{repo}/issues?state=all&per_page=100"),
-    ]);
-    return this.withBlockers(ticketsFromRest(spec, parseLines(subs), parseLines(all)));
+    const subs: any[] = [];
+    for await (const page of this.pages(`repos/{owner}/{repo}/issues/${spec}/sub_issues`)) subs.push(...page);
+    const subNums = new Set(subs.map((s) => s?.number));
+    // Every issue in the repo, so old text-parent tickets are found too. One page at a time,
+    // keeping only the spec and its tickets, so a big repo never builds one huge result.
+    // ponytail: reads all issues on each call. Use a search query if this gets slow.
+    const kept: any[] = [];
+    for await (const page of this.pages("repos/{owner}/{repo}/issues?state=all")) {
+      kept.push(...page.filter((i) => !i.pull_request && (i.number === spec || subNums.has(i.number) || parseParent(i.body) === spec)));
+    }
+    return this.withBlockers(ticketsFromRest(spec, subs, kept));
+  }
+
+  /** A REST list endpoint, 100 items per call, until a short page. */
+  private async *pages(path: string): AsyncGenerator<any[]> {
+    for (let page = 1; ; page++) {
+      const items = JSON.parse(await exec("gh", ["api", `${path}${path.includes("?") ? "&" : "?"}per_page=100&page=${page}`], this.repo));
+      if (!Array.isArray(items)) throw new Error(`Unexpected reply from GitHub for ${path}`);
+      yield items;
+      if (items.length < 100) return;
+    }
   }
 
   private async withBlockers(issues: Issue[]): Promise<Issue[]> {
@@ -66,9 +80,6 @@ const fromGh = (i: any): Issue => ({ number: i.number, title: i.title, body: i.b
 
 /** An issue as the REST API returns it. */
 const fromRest = (i: any): Issue => fromGh({ ...i, url: i.html_url });
-
-/** One JSON value per line, as `gh api --jq` prints them. */
-const parseLines = (out: string) => out.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
 
 /**
  * The tickets of a spec from REST issue objects: its sub-issues plus all issues with a parent line for it.

@@ -30,7 +30,7 @@ function Graph({ graph, onOpenRun }: { graph: SpecGraph; onOpenRun: (id: string)
             const lane = long.indexOf(e);
             const d = lane < 0
               ? `M${x1} ${y1} C${x1 + GAP_X / 2} ${y1} ${x2 - GAP_X / 2} ${y2} ${x2} ${y2}`
-              : `M${x1} ${y1} H${x1 + GAP_X / 2 - lane * 4} V${nodesHeight + GAP_Y + lane * LANE} H${x2 - GAP_X / 2 + lane * 4} V${y2} H${x2}`;
+              : `M${x1} ${y1} H${x1 + GAP_X / 2} V${nodesHeight + GAP_Y + lane * LANE} H${x2 - GAP_X / 2} V${y2} H${x2}`;
             return <path key={`${e.from}-${e.to}`} d={d} markerEnd="url(#arrowhead)" />;
           })}
         </svg>
