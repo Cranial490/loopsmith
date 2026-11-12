@@ -91,6 +91,16 @@ export interface Run {
 const MAX_OUTPUT = 30_000;
 const PROBLEM: RunStatus[] = ["failed", "needs_attention", "interrupted"];
 
+export type NodeStatus = "not_started" | "queued" | "running" | "waiting" | "done" | "failed" | "needs_attention" | "closed";
+export interface SpecNode { number: number; title: string; url?: string; depth: number; status: NodeStatus; runId?: string }
+/** A spec and its tickets. An edge goes from a blocker to the ticket it blocks. */
+export interface SpecGraph { number: number; title: string; body: string; nodes: SpecNode[]; edges: { from: number; to: number }[] }
+
+const NODE_STATUS: Record<RunStatus, NodeStatus> = {
+  queued: "queued", running: "running", waiting_approval: "waiting", waiting_input: "waiting", done: "done", failed: "failed",
+  needs_attention: "needs_attention", stopped: "needs_attention", interrupted: "needs_attention",
+};
+
 export class Engine extends EventEmitter {
   runs = new Map<string, Run>();
   private procs = new Map<string, RunningProc>();
@@ -300,12 +310,48 @@ export class Engine extends EventEmitter {
     }
   }
 
+  private latestRun(issue: number): Run | undefined {
+    return [...this.runs.values()].filter((r) => r.issue.number === issue).sort((a, b) => b.seq - a.seq)[0];
+  }
+
   /** Issue numbers this queued run still waits for. */
   waitingFor(run: Run): number[] {
     return run.blockedBy.filter((n) => {
-      const latest = [...this.runs.values()].filter((r) => r.issue.number === n).sort((a, b) => b.seq - a.seq)[0];
+      const latest = this.latestRun(n);
       return latest && latest.status !== "done";
     });
+  }
+
+  private specCache = new Map<number, { data: Promise<[Issue, Issue[]]>; loading: boolean }>();
+
+  /**
+   * The spec and its tickets from GitHub, kept until `refresh`. Run status is not part of it, so run updates
+   * never read GitHub. A refresh while a load is running shares that load. A failed load is not kept.
+   */
+  private specIssues(n: number, refresh: boolean): Promise<[Issue, Issue[]]> {
+    const cached = this.specCache.get(n);
+    if (cached && (!refresh || cached.loading)) return cached.data;
+    const entry = { loading: true, data: Promise.all([this.host.getIssue(n), this.host.listTickets(n)]).then(([spec, tickets]): [Issue, Issue[]] => {
+      if (!spec) throw new Error("no such issue");
+      return [spec, tickets];
+    }).catch((e) => {
+      if (this.specCache.get(n) === entry) this.specCache.delete(n);
+      throw new Error(`Could not load the tickets of spec #${n} from GitHub: ${e?.message ?? e}`);
+    }).finally(() => { entry.loading = false; }) };
+    this.specCache.set(n, entry);
+    return entry.data;
+  }
+
+  /** Spec `n` with its tickets as a graph. Blockers outside the spec give no edge. */
+  async specGraph(n: number, refresh = false): Promise<SpecGraph> {
+    const [spec, tickets] = await this.specIssues(n, refresh);
+    const depths = specDepths(tickets);
+    const nodes = tickets.map((t): SpecNode => {
+      const run = this.latestRun(t.number);
+      return { number: t.number, title: t.title, url: t.url, depth: depths.get(t.number)!, status: run ? NODE_STATUS[run.status] : t.state === "closed" ? "closed" : "not_started", runId: run?.id };
+    });
+    const edges = tickets.flatMap((t) => (t.blockedBy ?? []).filter((b) => depths.has(b)).map((b) => ({ from: b, to: t.number })));
+    return { number: spec.number, title: spec.title, body: spec.body ?? "", nodes, edges };
   }
 
   // ---------- scheduler ----------
@@ -734,6 +780,25 @@ export function orderByBlockers(issues: Issue[]): Issue[] {
   };
   [...issues].sort((a, b) => a.number - b.number).forEach(visit);
   return out;
+}
+
+/** Depth of each ticket: 0 with no blockers among `tickets`, otherwise one more than its deepest blocker. */
+export function specDepths(tickets: Issue[]): Map<number, number> {
+  const byNum = new Map(tickets.map((t) => [t.number, t]));
+  const depth = new Map<number, number>();
+  const visiting = new Set<number>();
+  const visit = (t: Issue): number => {
+    const known = depth.get(t.number);
+    if (known !== undefined) return known;
+    if (visiting.has(t.number)) return -1; // a loop: this blocker adds no depth
+    visiting.add(t.number);
+    const d = Math.max(-1, ...(t.blockedBy ?? []).map((b) => (byNum.has(b) ? visit(byNum.get(b)!) : -1))) + 1;
+    visiting.delete(t.number);
+    depth.set(t.number, d);
+    return d;
+  };
+  tickets.forEach(visit);
+  return depth;
 }
 
 /** All notes, newest last. If too long, drop the oldest notes first. */

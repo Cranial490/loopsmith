@@ -4,6 +4,7 @@ import { IssuesPanel } from "./IssuesPanel";
 import { RunCard } from "./RunCard";
 import { RunDetail } from "./RunDetail";
 import { PipelineEditor } from "./PipelineEditor";
+import { SpecsPage } from "./SpecsPage";
 
 export function App() {
   const [repo, setRepo] = useState("");
@@ -13,6 +14,15 @@ export function App() {
   const [tab, setTab] = useState<"runs" | "pipeline">("runs");
   const [selected, setSelected] = useState<string | null>(() => new URLSearchParams(location.search).get("run"));
   const [live, setLive] = useState(false);
+  // The Specs page is the hash route #/specs or #/specs/<spec number>.
+  const [hash, setHash] = useState(location.hash);
+  useEffect(() => {
+    const onHash = () => setHash(location.hash);
+    addEventListener("hashchange", onHash);
+    return () => removeEventListener("hashchange", onHash);
+  }, []);
+  const specRoute = hash.match(/^#\/specs(?:\/(\d+))?/);
+  const showTab = (t: "runs" | "pipeline") => { if (specRoute) location.hash = ""; setTab(t); };
 
   useEffect(() => {
     // Live updates that arrive while a state request runs wait for it, then apply on top.
@@ -72,8 +82,9 @@ export function App() {
       <header className="top">
         <div className="brand"><span className="logo">⟳</span> loopsmith {demo && <span className="pill demo">demo</span>}</div>
         <nav>
-          <button className={tab === "runs" ? "on" : ""} onClick={() => setTab("runs")}>Runs</button>
-          <button className={tab === "pipeline" ? "on" : ""} onClick={() => setTab("pipeline")}>Pipeline</button>
+          <button className={!specRoute && tab === "runs" ? "on" : ""} onClick={() => showTab("runs")}>Runs</button>
+          <button className={!specRoute && tab === "pipeline" ? "on" : ""} onClick={() => showTab("pipeline")}>Pipeline</button>
+          <a className={specRoute ? "on" : ""} href={`${location.pathname}#/specs`} target="_blank" rel="noopener" title="Open the Specs page in a new window">Specs ↗</a>
         </nav>
         <div className="meta">
           <span>{running} running</span>
@@ -84,7 +95,9 @@ export function App() {
         </div>
       </header>
 
-      {tab === "pipeline" ? (
+      {specRoute ? (
+        <SpecsPage spec={specRoute[1] ? Number(specRoute[1]) : undefined} refreshKey={list.map((r) => `${r.id}:${r.status}`).join()} config={config} run={sel} onOpenRun={setSelected} onCloseRun={() => setSelected(null)} />
+      ) : tab === "pipeline" ? (
         <PipelineEditor config={config} onSaved={setConfig} />
       ) : (
         <main className="runs-layout">

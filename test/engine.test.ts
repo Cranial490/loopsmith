@@ -345,3 +345,185 @@ test("stages do not inherit question/handoff paths from an outer Loopsmith run",
     }
   }
 });
+
+test("spec tickets: sub-issues JSON and parent lines are parsed and merged", async () => {
+  const { parseSubIssues, parseParent, ticketsOf } = await import("../server/github.ts");
+  // The shape `gh api repos/{owner}/{repo}/issues/N/sub_issues` returns.
+  const subs = [
+    { number: 21, title: "a", state: "open", html_url: "https://github.com/o/r/issues/21" },
+    { number: 22, title: "b", state: "closed", html_url: "https://github.com/o/r/issues/22" },
+    { number: 21, title: "a" }, // duplicate
+    { number: 20 }, // the spec itself
+    { number: 7, html_url: "https://github.com/other/repo/issues/7" }, // another repo: its number means nothing here
+    { title: "no number" },
+  ];
+  const spec = { number: 20, url: "https://github.com/o/r/issues/20" };
+  assert.deepEqual(parseSubIssues(subs, spec), [21, 22]);
+  assert.deepEqual(parseSubIssues([], spec), []);
+  assert.deepEqual(parseSubIssues({ message: "Not Found" }, spec), []);
+
+  assert.equal(parseParent("Part of #20\n\nDo the thing."), 20);
+  assert.equal(parseParent("## Parent\n\n#11\n\n## What to build\n\nSee #9"), 11);
+  assert.equal(parseParent("Intro\n\n## Parent #20"), 20);
+  assert.equal(parseParent("- **Part of:** #20"), 20);
+  assert.equal(parseParent("This is not part of #20, see #3"), undefined); // not a parent line
+  assert.equal(parseParent("## Parent\n\nNone\n\n## Blocked by\n\n- #4"), undefined); // #4 is a blocker, not the parent
+  assert.equal(parseParent(undefined), undefined);
+
+  const all = [
+    { number: 20, title: "spec", body: "Part of #20" },
+    { number: 21, title: "sub" },
+    { number: 22, title: "sub and text", body: "Part of #20" },
+    { number: 23, title: "text", body: "## Parent\n\n#20" },
+    { number: 24, title: "other spec", body: "Part of #99" },
+  ];
+  assert.deepEqual(ticketsOf(20, all, [22, 21, 20]).map((i) => i.number), [21, 22, 23]);
+
+  // The gh loader's REST shapes. Sub-issue #2 is not in the issue list (e.g. an old issue): it comes from the sub-issues response.
+  // Text-parent #3 sits far down a long list. Pull-request-free list, other repos' sub-issues skipped.
+  const { ticketsFromRest } = await import("../server/github.ts");
+  const rest = (number: number, extra = {}) => ({ number, title: `t${number}`, state: "open", html_url: `https://github.com/o/r/issues/${number}`, labels: [{ name: "x" }], ...extra });
+  const many = Array.from({ length: 700 }, (_, k) => rest(1000 - k));
+  const got = ticketsFromRest(20, [rest(2, { state: "closed" }), rest(21), { ...rest(9), html_url: "https://github.com/other/repo/issues/9" }], [rest(20), rest(21), ...many, rest(3, { body: "Part of #20" })]);
+  assert.deepEqual(got.map((i) => [i.number, i.title, i.state, i.url]), [
+    [2, "t2", "closed", "https://github.com/o/r/issues/2"], [3, "t3", "open", "https://github.com/o/r/issues/3"], [21, "t21", "open", "https://github.com/o/r/issues/21"],
+  ]);
+});
+
+test("spec graph: membership, edges, depth and status", async () => {
+  const host = new DemoHost();
+  // Demo mode has one open issue labelled `spec`. Closed specs and other issues are not listed.
+  host.issues.push({ number: 90, title: "old spec", labels: ["spec"], state: "closed" });
+  const specs = await host.listSpecs();
+  assert.equal(specs.length, 1);
+  const spec = specs[0];
+  assert.ok(spec.labels?.includes("spec"));
+  assert.ok((await host.listIssues()).every((i) => i.number !== 90), "closed issues are not in the open list");
+
+  const { repo, cfg } = makeRepo();
+  cfg.maxParallel = 4;
+  cfg.pipeline = [{ id: "a", type: "approval" }];
+  const engine = new Engine(repo, () => cfg, host);
+  const g = await engine.specGraph(spec.number);
+  assert.deepEqual({ number: g.number, title: g.title, body: g.body }, { number: spec.number, title: spec.title, body: spec.body });
+
+  // Membership: sub-issues and text-parent tickets, each once, and never the spec.
+  const nums = g.nodes.map((n) => n.number);
+  assert.equal(nums.length, 4);
+  assert.equal(new Set(nums).size, 4);
+  assert.ok(!nums.includes(spec.number));
+  const subs = host.subIssues[spec.number].map((s) => s.number);
+  assert.ok(subs.length > 0 && subs.length < 4, "the demo spec links some tickets as sub-issues and some by text");
+  const { parseParent } = await import("../server/github.ts");
+  assert.ok(g.nodes.some((n) => !subs.includes(n.number) && parseParent(host.issues.find((i) => i.number === n.number)!.body) === spec.number));
+
+  // A chain with one fork: root → two tickets → one that waits for both.
+  const [root, left, right, last] = [...g.nodes].sort((a, b) => a.depth - b.depth || a.number - b.number);
+  assert.deepEqual([root.depth, left.depth, right.depth, last.depth], [0, 1, 1, 2]);
+  const edges = g.edges.map((e) => `${e.from}>${e.to}`).sort();
+  assert.deepEqual(edges, [`${root.number}>${left.number}`, `${root.number}>${right.number}`, `${left.number}>${last.number}`, `${right.number}>${last.number}`].sort());
+  assert.ok(g.nodes.every((n) => n.status === "not_started" && n.runId === undefined));
+
+  // A blocker outside the spec gives no edge and no depth.
+  host.dependencies[root.number] = [{ number: 1 }];
+  const g2 = await engine.specGraph(spec.number, true);
+  assert.equal(g2.edges.length, 4);
+  assert.equal(g2.nodes.find((n) => n.number === root.number)!.depth, 0);
+  delete host.dependencies[root.number];
+  await engine.specGraph(spec.number, true);
+
+  // Status comes from the latest run of each issue.
+  const issues = await host.listTickets(spec.number);
+  const pick = (n: number) => issues.find((i) => i.number === n)!;
+  const [r1, r2] = engine.enqueue([pick(root.number), pick(left.number)], { autoApprove: false });
+  await waitFor(() => r1.status === "waiting_approval");
+  let now = await engine.specGraph(spec.number);
+  const st = (n: number) => now.nodes.find((x) => x.number === n)!;
+  assert.deepEqual([st(root.number).status, st(root.number).runId], ["waiting", r1.id]);
+  assert.deepEqual([st(left.number).status, st(left.number).runId], ["queued", r2.id]);
+  assert.equal(st(right.number).status, "not_started");
+  engine.stop(r1.id);
+  now = await engine.specGraph(spec.number);
+  assert.equal(st(root.number).status, "needs_attention");
+
+  // A newer run of the same issue wins.
+  const [r3] = engine.enqueue([pick(root.number)], { autoApprove: true });
+  await waitFor(() => r3.status === "done");
+  now = await engine.specGraph(spec.number);
+  assert.deepEqual([st(root.number).status, st(root.number).runId], ["done", r3.id]);
+
+  cfg.pipeline = [{ id: "s", type: "shell", command: "false" }];
+  const [r4] = engine.enqueue([pick(right.number)], { autoApprove: true });
+  await waitFor(() => r4.status === "failed");
+  now = await engine.specGraph(spec.number);
+  assert.equal(st(right.number).status, "failed");
+
+  // A closed ticket with no run shows as closed, and stays in the graph.
+  host.issues.find((i) => i.number === last.number)!.state = "closed";
+  now = await engine.specGraph(spec.number, true);
+  assert.equal(st(last.number).status, "closed");
+  assert.equal(now.nodes.length, 4);
+  engine.shutdown();
+
+  // A loop in the blockers must not hang the depth calculation.
+  const { specDepths } = await import("../server/engine.ts");
+  const d = specDepths([{ number: 1, title: "", blockedBy: [2] }, { number: 2, title: "", blockedBy: [1] }, { number: 3, title: "", blockedBy: [2] }]);
+  assert.equal(d.size, 3);
+});
+
+test("spec graph: a GitHub failure is a readable error", async () => {
+  const host = new DemoHost();
+  host.listTickets = async () => { throw new Error("gh api failed: HTTP 502"); };
+  const { repo, cfg } = makeRepo();
+  const engine = new Engine(repo, () => cfg, host);
+  await assert.rejects(engine.specGraph(10), /Could not load the tickets of spec #10 from GitHub: gh api failed: HTTP 502/);
+  engine.shutdown();
+});
+
+test("gh loader: a big repo still loads a spec's tickets, and every open spec is listed", async () => {
+  const { GhCli } = await import("../server/github.ts");
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "ls-gh-"));
+  fs.symlinkSync(path.resolve("test/fixtures/fake-gh.mjs"), path.join(bin, "gh"));
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${oldPath}`;
+  try {
+    const gh = new GhCli(process.cwd());
+    const tickets = await gh.listTickets(10);
+    assert.deepEqual(tickets.map((t) => t.number), [5, 300]); // never the pull request #6
+    assert.equal((await gh.listSpecs()).length, 250);
+  } finally { process.env.PATH = oldPath; }
+});
+
+test("spec graph: GitHub is read once, run status stays live, and one refresh runs at a time", async () => {
+  const host = new DemoHost();
+  let calls = 0, fail = false;
+  let release!: () => void;
+  let gate = new Promise<void>((r) => (release = r));
+  const list = host.listTickets.bind(host);
+  host.listTickets = async (n) => { calls++; await gate; if (fail) throw new Error("HTTP 502"); return list(n); };
+  const { repo, cfg } = makeRepo();
+  cfg.pipeline = [{ id: "a", type: "approval" }];
+  const engine = new Engine(repo, () => cfg, host);
+
+  // Many requests while GitHub is slow (e.g. a burst of run updates): one GitHub load, and every request gets the graph.
+  const burst = [engine.specGraph(10), engine.specGraph(10), engine.specGraph(10, true), engine.specGraph(10, true)];
+  release();
+  for (const g of await Promise.all(burst)) assert.equal(g.nodes.length, 4);
+  assert.equal(calls, 1);
+
+  // A run update changes the status without reading GitHub again.
+  const [run] = engine.enqueue([(await host.listTickets(10)).find((i) => i.number === 11)!], { autoApprove: false });
+  calls = 1;
+  await waitFor(() => run.status === "waiting_approval");
+  const g = await engine.specGraph(10);
+  assert.deepEqual([g.nodes.find((x) => x.number === 11)!.status, g.nodes.find((x) => x.number === 11)!.runId], ["waiting", run.id]);
+  assert.equal(calls, 1);
+
+  // A refresh reads GitHub again. A failed load is not kept, so the next request tries again.
+  fail = true;
+  await assert.rejects(engine.specGraph(10, true), /HTTP 502/);
+  fail = false;
+  assert.equal((await engine.specGraph(10)).nodes.length, 4);
+  assert.equal(calls, 3);
+  engine.shutdown();
+});
