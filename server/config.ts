@@ -18,6 +18,8 @@ export interface HarnessConfig {
    */
   format?: "text" | "claude-stream-json" | "codex-json";
   env?: Record<string, string>;
+  /** Args that pick the model when a stage sets one; they go just before {{prompt}}. Default: --model {{model}}. */
+  modelArgs?: string[];
 }
 
 /** Where to go after a stage. The first rule whose `when` is true (or has no `when`) wins. */
@@ -40,6 +42,8 @@ interface BaseStage {
 export interface AgentStage extends BaseStage {
   type: "agent";
   harness: string;
+  /** Model for this stage, passed with the harness's modelArgs. Empty = the CLI's default. */
+  model?: string;
   prompt: string;
   continueSession?: boolean;
   /** With continueSession: only continue a session from one of these stages. Empty = any stage of this harness. */
