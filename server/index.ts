@@ -41,7 +41,7 @@ const wrap = (fn: (req: express.Request, res: express.Response) => any) => async
   catch (e: any) { res.status(400).json({ error: e.message ?? String(e) }); }
 };
 
-app.get("/api/state", wrap(() => ({ repo, demo, config, runs: [...engine.runs.values()] })));
+app.get("/api/state", wrap(() => ({ repo, demo, config, runs: [...engine.runs.values()], closed: [...engine.closed] })));
 app.post("/api/runs/:id/answer", wrap((req) => engine.answer(String(req.params.id), String(req.body?.text ?? ""))));
 app.post("/api/runs/:id/send-back", wrap((req) => engine.sendBack(String(req.params.id), String(req.body?.notes ?? ""))));
 app.get("/api/issues", wrap(() => host.listIssues()));
@@ -85,6 +85,7 @@ setInterval(() => { for (const c of clients) c.write(": ping\n\n"); }, 20_000).u
 engine.on("run", (run) => broadcast("run", run));
 engine.on("log", (l) => broadcast("log", l));
 engine.on("removed", (id) => broadcast("removed", { id }));
+engine.on("closed", (closed) => broadcast("closed", closed));
 
 const webDist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../web/dist");
 if (fs.existsSync(webDist)) {

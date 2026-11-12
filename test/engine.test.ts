@@ -671,3 +671,43 @@ test("implement a spec: pressing again releases tickets whose blocker was closed
   assert.equal(r11.status, "failed"); // its history is kept
   engine.shutdown();
 });
+
+test("implement a spec: closed issues are remembered after a restart, without reading GitHub", async () => {
+  const host = new DemoHost();
+  const { repo, cfg } = makeRepo();
+  cfg.maxParallel = 1;
+  cfg.pipeline = [{ id: "s", type: "shell", command: "test {{issue.number}} != 11" }];
+  let engine = new Engine(repo, () => cfg, host);
+  const [old] = engine.enqueue([{ number: 11, title: "a" }], { autoApprove: true });
+  await waitFor(() => old.status === "failed");
+  host.issues.find((i) => i.number === 11)!.state = "closed";
+  await engine.specGraph(10);
+  engine.shutdown();
+
+  const offline = new DemoHost();
+  offline.listTickets = async () => { throw new Error("offline"); };
+  engine = new Engine(repo, () => cfg, offline);
+  const [r12] = engine.enqueue([{ number: 12, title: "b", blockedBy: [11] }], { autoApprove: true });
+  assert.deepEqual(engine.waitingFor(r12), []);
+  await waitFor(() => r12.status === "done"); // the old failed run of closed #11 holds no slot either
+  engine.shutdown();
+});
+
+test("implement a spec: pressing again gives queued tickets the current blocking links", async () => {
+  const host = new DemoHost();
+  const { repo, cfg } = makeRepo();
+  cfg.pipeline = [{ id: "s", type: "shell", command: "test {{issue.number}} != 11" }];
+  const engine = new Engine(repo, () => cfg, host);
+  const [r11, r12, r13] = await engine.implementSpec(10);
+  await waitFor(() => r11.status === "failed");
+  assert.deepEqual(engine.waitingFor(r12), [11]);
+
+  // #12 no longer waits for #11. #13 now also waits for #12.
+  host.issues.find((i) => i.number === 12)!.body = "Demo ticket.";
+  host.dependencies[13] = [{ number: 11 }, { number: 12 }];
+  assert.deepEqual(await engine.implementSpec(10), []);
+  assert.deepEqual([...r13.blockedBy].sort(), [11, 12]);
+  await waitFor(() => r12.status === "done");
+  assert.equal(r13.status, "queued");
+  engine.shutdown();
+});

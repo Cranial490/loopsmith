@@ -129,6 +129,7 @@ export class Engine extends EventEmitter {
 
   // ---------- persistence ----------
   private load() {
+    try { this.closed = new Set(JSON.parse(fs.readFileSync(this.closedFile(), "utf8"))); } catch {} // none yet, or half-written
     const dir = path.join(this.dataDir, "runs");
     for (const f of fs.readdirSync(dir)) {
       if (!f.endsWith(".json")) continue;
@@ -327,9 +328,10 @@ export class Engine extends EventEmitter {
   /**
    * Issues GitHub said are closed, learned when a spec is read. A closed issue counts as done:
    * it blocks nothing, and its old runs do not hold a slot. Their history is kept.
-   * ponytail: in memory only, so after a restart it is empty until a spec is read again.
+   * Saved to `closed.json`, so a restart keeps it.
    */
-  private closed = new Set<number>();
+  closed = new Set<number>();
+  private closedFile() { return path.join(this.dataDir, "closed.json"); }
 
   /** Issue numbers this queued run still waits for. */
   waitingFor(run: Run): number[] {
@@ -355,8 +357,15 @@ export class Engine extends EventEmitter {
       const nums = [...new Set(tickets.filter(isOpen).flatMap((t) => (t.blockedBy ?? []).filter((b) => !inSpec.has(b))))];
       // A blocker that cannot be read counts as open: refusing is the safe side.
       const blockers = await Promise.all(nums.map((b) => this.host.getIssue(b).catch(() => undefined).then((i): Issue => i ?? { number: b, title: "(could not read this issue)" })));
+      const before = [...this.closed].sort().join();
       for (const i of [...tickets, ...blockers]) if (isOpen(i)) this.closed.delete(i.number); else this.closed.add(i.number);
-      setImmediate(() => this.pump()); // a closed issue may free a slot or a blocked run
+      if ([...this.closed].sort().join() !== before) {
+        const p = this.closedFile();
+        fs.writeFileSync(p + ".tmp", JSON.stringify([...this.closed]));
+        fs.renameSync(p + ".tmp", p);
+        this.emit("closed", [...this.closed]);
+        setImmediate(() => this.pump()); // a closed issue may free a slot or a blocked run
+      }
       return [spec, tickets, blockers];
     }).catch((e) => {
       if (this.specCache.get(n) === entry) this.specCache.delete(n);
@@ -395,6 +404,12 @@ export class Engine extends EventEmitter {
     const graph = await this.specGraph(n, true); // read GitHub again: never start from old links
     if (graph.problem) throw new Error(graph.problem);
     const [, tickets] = await this.specIssues(n, false);
+    // Queued tickets follow the links just checked, not the ones they were queued with.
+    for (const t of tickets) {
+      const run = this.latestRun(t.number);
+      const now = t.blockedBy ?? [];
+      if (run?.status === "queued" && run.blockedBy.join() !== now.join()) { run.blockedBy = now; this.save(run); }
+    }
     return this.enqueue(tickets.filter((t) => graph.todo.includes(t.number)), { autoApprove: true }); // also pumps: closed blockers release queued runs
   }
 
