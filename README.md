@@ -73,7 +73,7 @@ In **hands-off** mode nobody can answer, so agents are told not to ask and to re
 
 ## Queue rules
 
-- Runs start in issue-number order, but an issue with a `Blocked by #N` section (the format `/to-issues` writes) always starts after issue N. The issue list shows `after #N`, and warns you when you select an issue without its open blocker.
+- Runs start in issue-number order, but an issue blocked by issue N always starts after issue N. Blockers come from GitHub's native "blocked by" links and from a `Blocked by #N` section in the issue body (the format `/to-issues` writes); both are used together. The issue list shows `after #N`, and warns you when you select an issue without its open blocker.
 - A run that waits for approval keeps its slot. A run that failed, was interrupted, or needs attention keeps it too (`holdQueueOnProblem`). So the next issue never starts on top of unmerged or broken work. Resume, stop or delete the run to free the slot.
 
 ## What happens when things go wrong

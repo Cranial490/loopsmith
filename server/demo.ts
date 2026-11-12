@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { defaultConfig, saveConfig, configPath } from "./config.js";
-import { parseBlockers, type GitHost, type Issue } from "./github.js";
+import { withNativeBlockers, type GitHost, type Issue } from "./github.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -45,11 +45,14 @@ export class DemoHost implements GitHost {
     { number: 2, title: "Create order API endpoint", labels: ["backend", "api"] },
     { number: 3, title: "Show order list in the dashboard", labels: ["frontend"] },
     { number: 4, title: "Send email when an order ships", labels: ["backend"] },
-  ].map((i) => ({ ...i, body: `Demo issue body for #${i.number}.\n\n## Blocked by\n\n${i.number === 1 ? "None - can start immediately" : `- #${i.number - 1}`}\n`, url: `https://github.com/demo/repo/issues/${i.number}` }));
+    { number: 5, title: "Export orders as CSV", labels: ["backend"] },
+  ].map((i) => ({ ...i, body: `Demo issue body for #${i.number}.\n\n## Blocked by\n\n${i.number === 1 || i.number === 5 ? "None - can start immediately" : `- #${i.number - 1}`}\n`, url: `https://github.com/demo/repo/issues/${i.number}` }));
 
-  constructor() { for (const i of this.issues) i.blockedBy = parseBlockers(i.body, i.number); }
-  async listIssues() { return this.issues; }
-  async getIssue(n: number) { return this.issues.find((i) => i.number === n)!; }
+  /** Native "blocked by" links, as the GitHub dependencies endpoint returns them. #5 has no text blocker. */
+  dependencies: Record<number, { number: number }[]> = { 5: [{ number: 2 }] };
+
+  async listIssues() { return Promise.all(this.issues.map((i) => withNativeBlockers(i, async (n) => JSON.stringify(this.dependencies[n] ?? [])))); }
+  async getIssue(n: number) { return (await this.listIssues()).find((i) => i.number === n)!; }
   async findPr(branch: string) {
     const n = Number(branch.match(/(\d+)$/)?.[1]);
     return n ? { number: 100 + n, url: `https://github.com/demo/repo/pull/${100 + n}` } : undefined;
