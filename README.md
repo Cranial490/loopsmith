@@ -31,7 +31,7 @@ You can also link it: `npm link`, then run `loopsmith` inside any repo.
 - **Max parallel = 1 (default)** means one issue at a time, all the way to merge. A run that waits for your approval keeps its slot. So issue #5 starts from a `main` that already has #4 merged. Raise the limit if your issues are independent.
 - **Pipeline = list of stages.** Stages run top to bottom. A stage can jump with rules, for example `if score >= 8 → approve, else → fix`. That is how the review loop works.
 - **Stage types**
-  - `agent`: runs a harness with a prompt template. Can pull variables from the output with a regex (for example `score` from `SCORE: 8/10`). Can continue the last session of the same harness (useful for "fix").
+  - `agent`: runs a harness with a prompt template. Can pull variables from the output with a regex (for example `score` from `SCORE: 8/10`, `Score 8/10` or `**Score:** 8/10`). Can continue the last session of the same harness (useful for "fix").
   - `shell`: runs a bash command in the worktree (merge, `npm test`, a lint gate, …).
   - `approval`: waits for you in the UI. In **hands-off** mode (a checkbox when you start runs) it passes on its own.
 - **Safety limits.** `maxRuns` on a stage stops endless loops. The run goes to *needs attention*, and you can resume it with the limits reset.

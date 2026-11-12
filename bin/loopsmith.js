@@ -11,8 +11,14 @@ if (!args.includes("--repo") && !args.includes("--demo")) args.push("--repo", pr
 function run(command, args, cwd) {
   return new Promise((resolve) => {
     const child = spawn(command, args, { cwd, stdio: "inherit" });
+    // Pass stop signals on, or the server outlives this launcher (e.g. a terminal that only kills its own child).
+    const forward = (sig) => child.kill(sig);
+    for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(sig, forward);
     child.on("error", (error) => { console.error(error.message); resolve(1); });
-    child.on("exit", (code) => resolve(code ?? 1));
+    child.on("exit", (code) => {
+      for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.off(sig, forward);
+      resolve(code ?? 1);
+    });
   });
 }
 
