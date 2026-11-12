@@ -368,7 +368,10 @@ export class Engine extends EventEmitter {
 
   /** Spec `n` with its tickets as a graph. Blockers outside the spec give no edge; the open ones are in `outside`. */
   async specGraph(n: number, refresh = false): Promise<SpecGraph> {
-    const [spec, tickets, blockers] = await this.specIssues(n, refresh);
+    return this.buildGraph(n, await this.specIssues(n, refresh));
+  }
+
+  private buildGraph(n: number, [spec, tickets, blockers]: [Issue, Issue[], Issue[]]): SpecGraph {
     const depths = specDepths(tickets);
     const nodes = tickets.map((t): SpecNode => {
       const run = this.latestRun(t.number);
@@ -393,9 +396,11 @@ export class Engine extends EventEmitter {
    * new to queue still gives queued tickets the current closed state and links.
    */
   async implementSpec(n: number): Promise<Run[]> {
-    const graph = await this.specGraph(n, true); // read GitHub again: never start from old links
+    // Read GitHub again (never start from old links), and use this one snapshot for the check and every change below.
+    const data = await this.specIssues(n, true);
+    const graph = this.buildGraph(n, data);
     if (graph.problem) throw new Error(graph.problem);
-    const [, tickets, blockers] = await this.specIssues(n, false);
+    const [, tickets, blockers] = data;
     // Only now, with the graph checked, does the scheduler take on GitHub's state. A graph read or a refusal changes nothing.
     // No await from here to `enqueue`, so the scheduler sees closed issues and new links together.
     const before = [...this.closed].sort().join();
@@ -407,7 +412,8 @@ export class Engine extends EventEmitter {
       this.emit("closed", [...this.closed]);
     }
     // Queued tickets follow the links just checked, not the ones they were queued with.
-    for (const t of tickets) {
+    // A queued run of a closed issue (a ticket, or an outside blocker) is stopped.
+    for (const t of [...tickets, ...blockers]) {
       const run = this.latestRun(t.number);
       const now = t.blockedBy ?? [];
       if (run?.status !== "queued") continue;
@@ -416,7 +422,7 @@ export class Engine extends EventEmitter {
         run.status = "stopped";
         run.error = `#${t.number} was closed on GitHub, so this run was stopped before it started. Resume it to run it anyway.`;
         this.save(run);
-      } else if (run.blockedBy.join() !== now.join()) { run.blockedBy = now; this.save(run); }
+      } else if (tickets.includes(t) && run.blockedBy.join() !== now.join()) { run.blockedBy = now; this.save(run); }
     }
     return this.enqueue(tickets.filter((t) => graph.todo.includes(t.number)), { autoApprove: true }); // also pumps: closed blockers release queued runs
   }

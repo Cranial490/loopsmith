@@ -754,3 +754,43 @@ test("implement a spec: Continue stops the queued run of a ticket closed on GitH
   assert.deepEqual([r11.status, r12.status, r12.steps.length], ["failed", "stopped", 0]);
   engine.shutdown();
 });
+
+test("implement a spec: the links that start work are the links that were checked", async () => {
+  const host = new DemoHost();
+  const { repo, cfg } = makeRepo();
+  cfg.pipeline = [{ id: "a", type: "approval" }];
+  const engine = new Engine(repo, () => cfg, host);
+  // Right after Implement checks the graph, another request refreshes it, and GitHub now has an open outside blocker.
+  const can = (engine as any).canImplement.bind(engine);
+  let once = true;
+  (engine as any).canImplement = (n: number) => {
+    if (once) { once = false; host.dependencies[11] = [{ number: 1 }]; void engine.specGraph(10, true); }
+    return can(n);
+  };
+  const runs = await engine.implementSpec(10);
+  assert.deepEqual(runs.map((r) => r.issue.number), [11, 12, 13, 14]);
+  assert.deepEqual(runs[0].blockedBy, [], "#11 got the checked links, not the newer unchecked ones");
+  engine.shutdown();
+});
+
+test("implement a spec: Continue stops a queued run of a closed outside blocker", async () => {
+  const host = new DemoHost();
+  const { repo, cfg } = makeRepo();
+  cfg.pipeline = [{ id: "a", type: "approval" }];
+  const engine = new Engine(repo, () => cfg, host);
+  // #1 (outside the spec) is queued behind #2, which waits for approval.
+  const [r2, r1] = engine.enqueue([{ number: 2, title: "b" }, { number: 1, title: "a", blockedBy: [2] }], { autoApprove: false });
+  await waitFor(() => r2.status === "waiting_approval");
+  assert.equal(r1.status, "queued");
+
+  // #1 is done by hand and closed, and it blocks #11. Implement must not start #1.
+  host.issues.find((i) => i.number === 1)!.state = "closed";
+  host.dependencies[11] = [{ number: 1 }];
+  cfg.pipeline = [{ id: "s", type: "shell", command: "true" }];
+  const runs = await engine.implementSpec(10);
+  assert.equal(r1.status, "stopped");
+  assert.match(r1.error!, /#1 was closed on GitHub/);
+  await waitFor(() => runs.every((r) => r.status === "done"));
+  assert.deepEqual([r1.status, r1.steps.length], ["stopped", 0]);
+  engine.shutdown();
+});
