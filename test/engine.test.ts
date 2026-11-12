@@ -45,6 +45,8 @@ test("model args go before the prompt, or at the end", () => {
   assert.deepEqual(withModel(["exec", "--json", "resume", "{{sessionId}}", "{{prompt}}"], m), ["exec", "--json", "resume", "{{sessionId}}", "--model", "{{model}}", "{{prompt}}"]);
   assert.deepEqual(withModel(["run", "--prompt={{prompt}}"], m), ["run", "--prompt={{prompt}}", "--model", "{{model}}"]);
   assert.deepEqual(withModel(["-p", "{{prompt}}"], []), ["-p", "{{prompt}}"]);
+  // A model already in the harness args is replaced, not given twice.
+  assert.deepEqual(withModel(["exec", "--model", "gpt-6-astra", "resume", "{{sessionId}}", "{{prompt}}"], m), ["exec", "--model", "{{model}}", "resume", "{{sessionId}}", "{{prompt}}"]);
 });
 
 test("codex model list: every slug from `codex debug models`", () => {
