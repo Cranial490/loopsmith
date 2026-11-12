@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { NO_QUESTIONS } from "./config.js";
 import type { Config, Stage, AgentStage, ShellStage, ApprovalStage } from "./config.js";
 import type { GitHost, Issue } from "./github.js";
-import { ensureWorktree, removeWorktree, deleteBranch } from "./git.js";
+import { ensureWorktree, ensureBranch, removeWorktree, deleteBranch } from "./git.js";
 import { render, renderShell, evalCondition, extractVars } from "./template.js";
 import { startProc, type RunningProc } from "./proc.js";
 import { StreamParser, usageSince, type TokenUsage } from "./streams.js";
@@ -66,6 +66,10 @@ export interface Run {
   branch: string;
   worktree: string;
   pr?: { number: number; url: string };
+  /** A spec ticket: the spec it belongs to. Its branch starts from, and its PR goes into, `baseBranch` (the spec branch). */
+  spec?: number;
+  /** Not set = the configured base branch. */
+  baseBranch?: string;
   vars: Record<string, string | number>;
   outputs: Record<string, string>;
   /** Notes agents (and you) leave for the agents after them, oldest first. */
@@ -184,7 +188,7 @@ export class Engine extends EventEmitter {
   }
 
   // ---------- public actions ----------
-  enqueue(issues: Issue[], options: Run["options"]): Run[] {
+  enqueue(issues: Issue[], options: Run["options"], spec?: Pick<Run, "spec" | "baseBranch">): Run[] {
     const cfg = this.getConfig();
     const created: Run[] = [];
     for (const issue of orderByBlockers(issues)) {
@@ -196,6 +200,7 @@ export class Engine extends EventEmitter {
         issue,
         status: "queued",
         options,
+        ...spec,
         branch: `${cfg.branchPrefix}${issue.number}`,
         worktree: path.resolve(this.repo, cfg.worktreeDir, `issue-${issue.number}`),
         vars: {},
@@ -401,6 +406,8 @@ export class Engine extends EventEmitter {
     const graph = this.buildGraph(n, data);
     if (graph.problem) throw new Error(graph.problem);
     const [, tickets, blockers] = data;
+    const base = specBranch(n);
+    if (graph.todo.length) await ensureBranch(this.repo, base, this.getConfig().baseBranch);
     // Only now, with the graph checked, does the scheduler take on GitHub's state. A graph read or a refusal changes nothing.
     // No await from here to `enqueue`, so the scheduler sees closed issues and new links together.
     const before = [...this.closed].sort().join();
@@ -424,7 +431,29 @@ export class Engine extends EventEmitter {
         this.save(run);
       } else if (tickets.includes(t) && run.blockedBy.join() !== now.join()) { run.blockedBy = now; this.save(run); }
     }
-    return this.enqueue(tickets.filter((t) => graph.todo.includes(t.number)), { autoApprove: true }); // also pumps: closed blockers release queued runs
+    const made = this.enqueue(tickets.filter((t) => graph.todo.includes(t.number)), { autoApprove: true }, { spec: n, baseBranch: base }); // also pumps: closed blockers release queued runs
+    if (!made.length) await this.finishSpec(n);
+    return made;
+  }
+
+  /**
+   * Every open ticket of spec `n` is done on the spec branch: open one PR from the spec branch into the base branch.
+   * Ticket PRs merge into the spec branch, where GitHub does not close issues, so this PR closes the spec and its tickets.
+   */
+  private async finishSpec(n: number, run?: Run) {
+    const say = (t: string) => run && this.log(run, run.steps.length - 1, `\n[loopsmith] ${t}\n`);
+    const head = specBranch(n), base = this.getConfig().baseBranch;
+    try {
+      const [spec, tickets] = await this.specIssues(n, false);
+      const runs = tickets.filter(isOpen).filter((t) => !this.closed.has(t.number)).map((t) => this.latestRun(t.number));
+      if (!runs.length || !runs.every((r) => r?.status === "done" && r.baseBranch === head)) return;
+      if (await this.host.findPr(head)) return;
+      const body = `Implements spec #${n}: every ticket was merged into \`${head}\`.\n\nCloses #${n}\n${runs.map((r) => `Closes #${r!.issue.number}`).join("\n")}\n`;
+      const pr = await this.host.createPr({ head, base, title: `${spec.title} (spec #${n})`, body });
+      say(`every ticket of spec #${n} is done: opened PR #${pr.number} from ${head} into ${base} (${pr.url})`);
+    } catch (e: any) {
+      say(`could not open the spec PR from ${head} into ${base}: ${e?.message ?? e}. Press Continue on the spec to try again.`);
+    }
   }
 
   /** No run yet, or the newest one was stopped by you. */
@@ -558,6 +587,7 @@ export class Engine extends EventEmitter {
     run.status = "done";
     run.currentStageId = undefined;
     this.save(run);
+    if (run.spec) await this.finishSpec(run.spec, run);
     if (cfg.removeWorktreeWhenDone) {
       await removeWorktree(this.repo, run.worktree);
       try {
@@ -576,7 +606,7 @@ export class Engine extends EventEmitter {
   private async prepareWorktree(run: Run, step: Step, cfg: Config) {
     if (fs.existsSync(path.join(run.worktree, ".git"))) return;
     const log = (s: string) => this.log(run, step.index, s);
-    await ensureWorktree(this.repo, run.worktree, run.branch, cfg.baseBranch, log);
+    await ensureWorktree(this.repo, run.worktree, run.branch, run.baseBranch ?? cfg.baseBranch, log);
     for (const f of cfg.copyFiles ?? []) {
       const src = path.resolve(this.repo, f), dst = path.resolve(run.worktree, f);
       if (!src.startsWith(this.repo + path.sep) || !fs.existsSync(src) || fs.existsSync(dst)) continue;
@@ -815,7 +845,7 @@ export class Engine extends EventEmitter {
       issue: run.issue,
       pr: run.pr ?? {},
       branch: run.branch,
-      baseBranch: cfg.baseBranch,
+      baseBranch: run.baseBranch ?? cfg.baseBranch,
       worktree: run.worktree,
       vars: run.vars,
       feedback: run.feedback ?? "",
@@ -862,6 +892,9 @@ export function orderByBlockers(issues: Issue[]): Issue[] {
 }
 
 const isOpen = (i: Issue) => i.state !== "closed";
+
+/** The branch a spec's tickets start from and merge into. */
+export const specBranch = (spec: number) => `spec/${spec}`;
 
 /** One loop in the "blocked by" links of `tickets`, each ticket blocking the next and the last blocking the first. Empty = no loop. */
 export function findLoop(tickets: Issue[]): number[] {

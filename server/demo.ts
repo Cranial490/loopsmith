@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { defaultConfig, saveConfig, configPath } from "./config.js";
-import { withNativeBlockers, ticketsOf, parseSubIssues, SPEC_LABEL, type GitHost, type Issue } from "./github.js";
+import { withNativeBlockers, ticketsOf, parseSubIssues, SPEC_LABEL, type GitHost, type Issue, type PullRequest } from "./github.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -72,8 +72,15 @@ export class DemoHost implements GitHost {
   async getIssue(n: number) { return (await this.withBlockers(this.issues.filter((i) => i.number === n)))[0]; }
   async listSpecs() { return this.open().filter((i) => i.labels?.includes(SPEC_LABEL)); }
   async listTickets(spec: number) { return this.withBlockers(ticketsOf(spec, this.issues, parseSubIssues(this.subIssues[spec] ?? [], { number: spec }))); }
+  /** PRs made with createPr, by head branch. */
+  prs: Record<string, PullRequest & { head: string; base: string; title: string; body: string }> = {};
+  async createPr(pr: { head: string; base: string; title: string; body: string }) {
+    const number = 900 + Object.keys(this.prs).length;
+    return (this.prs[pr.head] = { ...pr, number, url: `https://github.com/demo/repo/pull/${number}` });
+  }
   async findPr(branch: string) {
-    const n = Number(branch.match(/(\d+)$/)?.[1]);
+    if (this.prs[branch]) return this.prs[branch];
+    const n = Number(branch.match(/issue-(\d+)$/)?.[1]);
     return n ? { number: 100 + n, url: `https://github.com/demo/repo/pull/${100 + n}` } : undefined;
   }
 }
