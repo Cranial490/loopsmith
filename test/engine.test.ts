@@ -426,10 +426,11 @@ test("spec graph: membership, edges, depth and status", async () => {
 
   // A blocker outside the spec gives no edge and no depth.
   host.dependencies[root.number] = [{ number: 1 }];
-  const g2 = await engine.specGraph(spec.number);
+  const g2 = await engine.specGraph(spec.number, true);
   assert.equal(g2.edges.length, 4);
   assert.equal(g2.nodes.find((n) => n.number === root.number)!.depth, 0);
   delete host.dependencies[root.number];
+  await engine.specGraph(spec.number, true);
 
   // Status comes from the latest run of each issue.
   const issues = await host.listTickets(spec.number);
@@ -459,7 +460,7 @@ test("spec graph: membership, edges, depth and status", async () => {
 
   // A closed ticket with no run shows as closed, and stays in the graph.
   host.issues.find((i) => i.number === last.number)!.state = "closed";
-  now = await engine.specGraph(spec.number);
+  now = await engine.specGraph(spec.number, true);
   assert.equal(st(last.number).status, "closed");
   assert.equal(now.nodes.length, 4);
   engine.shutdown();
@@ -491,4 +492,38 @@ test("gh loader: a big repo still loads a spec's tickets, and every open spec is
     assert.deepEqual(tickets.map((t) => t.number), [5, 300]); // never the pull request #6
     assert.equal((await gh.listSpecs()).length, 250);
   } finally { process.env.PATH = oldPath; }
+});
+
+test("spec graph: GitHub is read once, run status stays live, and one refresh runs at a time", async () => {
+  const host = new DemoHost();
+  let calls = 0, fail = false;
+  let release!: () => void;
+  let gate = new Promise<void>((r) => (release = r));
+  const list = host.listTickets.bind(host);
+  host.listTickets = async (n) => { calls++; await gate; if (fail) throw new Error("HTTP 502"); return list(n); };
+  const { repo, cfg } = makeRepo();
+  cfg.pipeline = [{ id: "a", type: "approval" }];
+  const engine = new Engine(repo, () => cfg, host);
+
+  // Many requests while GitHub is slow (e.g. a burst of run updates): one GitHub load, and every request gets the graph.
+  const burst = [engine.specGraph(10), engine.specGraph(10), engine.specGraph(10, true), engine.specGraph(10, true)];
+  release();
+  for (const g of await Promise.all(burst)) assert.equal(g.nodes.length, 4);
+  assert.equal(calls, 1);
+
+  // A run update changes the status without reading GitHub again.
+  const [run] = engine.enqueue([(await host.listTickets(10)).find((i) => i.number === 11)!], { autoApprove: false });
+  calls = 1;
+  await waitFor(() => run.status === "waiting_approval");
+  const g = await engine.specGraph(10);
+  assert.deepEqual([g.nodes.find((x) => x.number === 11)!.status, g.nodes.find((x) => x.number === 11)!.runId], ["waiting", run.id]);
+  assert.equal(calls, 1);
+
+  // A refresh reads GitHub again. A failed load is not kept, so the next request tries again.
+  fail = true;
+  await assert.rejects(engine.specGraph(10, true), /HTTP 502/);
+  fail = false;
+  assert.equal((await engine.specGraph(10)).nodes.length, 4);
+  assert.equal(calls, 3);
+  engine.shutdown();
 });

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, NODE_LABEL, type Config, type Issue, type Run, type SpecGraph } from "./api";
 import { Markdown } from "./Markdown";
 import { RunDetail } from "./RunDetail";
@@ -52,21 +52,29 @@ export function SpecsPage({ spec, refreshKey, config, onOpenRun, onCloseRun, run
   const [specs, setSpecs] = useState<Issue[] | null>(null);
   const [listErr, setListErr] = useState("");
   const [graph, setGraph] = useState<SpecGraph | null>(null);
-  const [graphErr, setGraphErr] = useState("");
+  const [graphErr, setGraphErr] = useState<{ spec: number; message: string } | null>(null);
   const [reload, setReload] = useState(0);
 
   useEffect(() => { setListErr(""); api.specs().then(setSpecs, (e) => setListErr(e.message)); }, [reload]);
   // No spec in the URL: show the first one.
   useEffect(() => { if (!spec && specs?.length) location.replace(`#/specs/${specs[0].number}`); }, [spec, specs]);
-  // Load the graph again when a run changes status, so the nodes follow the Runs view.
-  // ponytail: every reload asks GitHub again. Cache the tickets in the engine if this gets slow.
+  // Ask again when a run changes status. The engine keeps the GitHub data, so this only reads run status;
+  // ↻ reads GitHub again. The newest answer that arrives is shown; no answer is thrown away for being slow.
+  const newest = useRef(0);
+  const shownSeq = useRef(0);
+  const lastReload = useRef(reload);
   useEffect(() => {
     if (!spec) return;
-    let stale = false;
-    api.spec(spec).then((g) => { if (!stale) { setGraph(g); setGraphErr(""); } }, (e) => { if (!stale) setGraphErr(e.message); });
-    return () => { stale = true; };
+    const my = ++newest.current;
+    const refresh = lastReload.current !== reload;
+    lastReload.current = reload;
+    api.spec(spec, refresh).then(
+      (g) => { if (my >= shownSeq.current) { shownSeq.current = my; setGraph(g); setGraphErr(null); } },
+      (e) => { if (my >= shownSeq.current) { shownSeq.current = my; setGraphErr({ spec, message: e.message }); } },
+    );
   }, [spec, refreshKey, reload]);
   const shown = graph?.number === spec ? graph : null;
+  const err = graphErr && graphErr.spec === spec ? graphErr.message : "";
 
   return (
     <main className="runs-layout">
@@ -89,8 +97,8 @@ export function SpecsPage({ spec, refreshKey, config, onOpenRun, onCloseRun, run
       <section className="runs-main">
         {run ? <RunDetail run={run} config={config} onBack={onCloseRun} /> : (
           <div className="spec-page">
-            {graphErr && <div className="error">{graphErr}</div>}
-            {spec && !shown && !graphErr && <div className="muted">Loading spec #{spec}…</div>}
+            {err && <div className="error">{err}</div>}
+            {spec && !shown && !err && <div className="muted">Loading spec #{spec}…</div>}
             {shown && <>
               <h2><span className="num">#{shown.number}</span> {shown.title}</h2>
               {shown.nodes.length ? <Graph graph={shown} onOpenRun={onOpenRun} /> : <div className="muted">This spec has no tickets yet. Add sub-issues, or a <code>Part of #{shown.number}</code> line to an issue.</div>}

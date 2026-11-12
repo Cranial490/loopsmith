@@ -322,12 +322,29 @@ export class Engine extends EventEmitter {
     });
   }
 
-  /** Spec `n` with its tickets as a graph. Blockers outside the spec give no edge. */
-  async specGraph(n: number): Promise<SpecGraph> {
-    const [spec, tickets] = await Promise.all([this.host.getIssue(n), this.host.listTickets(n)]).catch((e) => {
+  private specCache = new Map<number, { data: Promise<[Issue, Issue[]]>; loading: boolean }>();
+
+  /**
+   * The spec and its tickets from GitHub, kept until `refresh`. Run status is not part of it, so run updates
+   * never read GitHub. A refresh while a load is running shares that load. A failed load is not kept.
+   */
+  private specIssues(n: number, refresh: boolean): Promise<[Issue, Issue[]]> {
+    const cached = this.specCache.get(n);
+    if (cached && (!refresh || cached.loading)) return cached.data;
+    const entry = { loading: true, data: Promise.all([this.host.getIssue(n), this.host.listTickets(n)]).then(([spec, tickets]): [Issue, Issue[]] => {
+      if (!spec) throw new Error("no such issue");
+      return [spec, tickets];
+    }).catch((e) => {
+      if (this.specCache.get(n) === entry) this.specCache.delete(n);
       throw new Error(`Could not load the tickets of spec #${n} from GitHub: ${e?.message ?? e}`);
-    });
-    if (!spec) throw new Error(`Could not load the tickets of spec #${n} from GitHub: no issue #${n}`);
+    }).finally(() => { entry.loading = false; }) };
+    this.specCache.set(n, entry);
+    return entry.data;
+  }
+
+  /** Spec `n` with its tickets as a graph. Blockers outside the spec give no edge. */
+  async specGraph(n: number, refresh = false): Promise<SpecGraph> {
+    const [spec, tickets] = await this.specIssues(n, refresh);
     const depths = specDepths(tickets);
     const nodes = tickets.map((t): SpecNode => {
       const run = this.latestRun(t.number);

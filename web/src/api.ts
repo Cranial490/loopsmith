@@ -16,7 +16,7 @@ export const api = {
   state: () => call<{ repo: string; demo: boolean; config: Config; runs: Run[] }>("GET", "/api/state"),
   issues: () => call<Issue[]>("GET", "/api/issues"),
   specs: () => call<Issue[]>("GET", "/api/specs"),
-  spec: (n: number) => call<SpecGraph>("GET", `/api/specs/${n}`),
+  spec: (n: number, refresh = false) => call<SpecGraph>("GET", `/api/specs/${n}${refresh ? "?refresh=1" : ""}`),
   start: (issues: Issue[], autoApprove: boolean) => call<Run[]>("POST", "/api/runs", { issues, autoApprove }),
   approve: (id: string) => call("POST", `/api/runs/${id}/approve`),
   reject: (id: string) => call("POST", `/api/runs/${id}/reject`),

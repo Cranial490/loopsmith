@@ -79,6 +79,7 @@ In **hands-off** mode nobody can answer, so agents are told not to ask and to re
 - A spec's tickets are its GitHub sub-issues, plus issues whose body has a `Part of #N` line or a `## Parent` heading followed by `#N`.
 - Tickets are in columns by depth: a ticket sits one column after its deepest blocker in the spec. Arrows go from a blocker to the ticket it blocks.
 - Each ticket shows the status of its latest run. A closed ticket with no run shows as closed. Click a ticket that has a run to open the run.
+- Loopsmith reads a spec's tickets from GitHub once and keeps them. Run status updates live without asking GitHub again. Press ↻ to read GitHub again.
 
 ## Queue rules
 
