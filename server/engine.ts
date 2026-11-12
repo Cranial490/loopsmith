@@ -751,6 +751,11 @@ const DEFAULT_MODEL_ARGS = ["--model", "{{model}}"];
 /** Put the model args just before the {{prompt}} arg (after any subcommand like `exec resume`), or at the end. */
 export function withModel(args: string[], modelArgs: string[]): string[] {
   if (!modelArgs.length) return args;
+  // The harness args already pick a model (`--model x`): the stage's model replaces it,
+  // since CLIs like Codex refuse the flag twice.
+  const [flag, value] = modelArgs;
+  const f = modelArgs.length === 2 ? args.indexOf(flag) : -1;
+  if (f >= 0 && f + 1 < args.length) return args.map((a, j) => (j === f + 1 ? value : a));
   const i = args.indexOf("{{prompt}}");
   return i < 0 ? [...args, ...modelArgs] : [...args.slice(0, i), ...modelArgs, ...args.slice(i)];
 }
